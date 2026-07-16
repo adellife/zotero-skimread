@@ -1,0 +1,248 @@
+<linkset>
+  <html:link rel="localization" href="__addonRef__-preferences.ftl" />
+</linkset>
+<groupbox
+  onload="Zotero.__addonInstance__.hooks.onPrefsEvent('load', { window })"
+>
+  <label><html:h2 data-l10n-id="pref-title"></html:h2></label>
+
+  <hbox align="center">
+    <html:label
+      for="zotero-prefpane-__addonRef__-apiType"
+      data-l10n-id="pref-api-type"
+    ></html:label>
+    <menulist id="zotero-prefpane-__addonRef__-apiType" style="width: 280px">
+      <menupopup>
+        <menuitem label="Ollama (local)" value="ollama" />
+        <menuitem
+          label="OpenAI-compatible local server (vLLM, llama.cpp, LM Studio)"
+          value="openai-compatible"
+        />
+        <menuitem label="OpenAI API (cloud)" value="openai-api" />
+        <menuitem label="Anthropic API (cloud)" value="anthropic" />
+        <menuitem
+          label="Codex App Server (ChatGPT login)"
+          value="codex-app-server"
+        />
+      </menupopup>
+    </menulist>
+  </hbox>
+
+  <vbox
+    id="zotero-prefpane-__addonRef__-cloud-settings"
+    style="display: none; gap: 8px"
+  >
+    <description style="max-width: 520px; color: #9a3412">
+      Cloud mode sends extracted PDF text to the selected provider. Local Reader
+      never falls back to cloud automatically.
+    </description>
+    <checkbox
+      id="zotero-prefpane-__addonRef__-cloudConsent"
+      preference="cloudConsent"
+      label="I understand that extracted PDF text will leave this computer"
+    />
+    <hbox id="zotero-prefpane-__addonRef__-openai-key-row" align="center">
+      <html:label for="zotero-prefpane-__addonRef__-openaiApiKey"
+        >OpenAI API key</html:label
+      >
+      <html:input
+        type="password"
+        id="zotero-prefpane-__addonRef__-openaiApiKey"
+        preference="openaiApiKey"
+        style="width: 260px"
+      />
+    </hbox>
+    <hbox id="zotero-prefpane-__addonRef__-anthropic-key-row" align="center">
+      <html:label for="zotero-prefpane-__addonRef__-anthropicApiKey"
+        >Anthropic API key</html:label
+      >
+      <html:input
+        type="password"
+        id="zotero-prefpane-__addonRef__-anthropicApiKey"
+        preference="anthropicApiKey"
+        style="width: 260px"
+      />
+    </hbox>
+    <vbox id="zotero-prefpane-__addonRef__-codex-settings" style="gap: 8px">
+      <description style="max-width: 520px">
+        Uses your local Codex CLI session. Run
+        <html:code>codex login</html:code>
+        first. The reader starts an ephemeral Codex thread only for its
+        structured whole-paper selection; it does not expose Zotero tools, chat,
+        notes, or file changes to Codex.
+      </description>
+      <hbox align="center">
+        <html:label for="zotero-prefpane-__addonRef__-codexModel"
+          >Codex model</html:label
+        >
+        <html:input
+          type="text"
+          id="zotero-prefpane-__addonRef__-codexModel"
+          preference="codexModel"
+          style="width: 220px"
+        />
+      </hbox>
+      <hbox align="center">
+        <html:label for="zotero-prefpane-__addonRef__-codexReasoning"
+          >Codex reasoning</html:label
+        >
+        <html:select
+          id="zotero-prefpane-__addonRef__-codexReasoning"
+          preference="codexReasoning"
+        >
+          <html:option value="low">Low</html:option>
+          <html:option value="medium">Medium</html:option>
+          <html:option value="high">High</html:option>
+        </html:select>
+      </hbox>
+      <hbox align="center">
+        <html:label for="zotero-prefpane-__addonRef__-codexPath"
+          >Codex CLI path</html:label
+        >
+        <html:input
+          type="text"
+          id="zotero-prefpane-__addonRef__-codexPath"
+          preference="codexPath"
+          style="width: 260px"
+        />
+      </hbox>
+    </vbox>
+    <hbox align="center">
+      <html:label for="zotero-prefpane-__addonRef__-cloudContextTokens"
+        >Cloud context budget (tokens)</html:label
+      >
+      <html:input
+        type="number"
+        id="zotero-prefpane-__addonRef__-cloudContextTokens"
+        preference="cloudContextTokens"
+        min="16000"
+        step="1000"
+        style="width: 110px"
+      />
+    </hbox>
+    <hbox align="center">
+      <html:label for="zotero-prefpane-__addonRef__-maxOutputTokens"
+        >Maximum structured output tokens</html:label
+      >
+      <html:input
+        type="number"
+        id="zotero-prefpane-__addonRef__-maxOutputTokens"
+        preference="maxOutputTokens"
+        min="1024"
+        step="1024"
+        style="width: 110px"
+      />
+    </hbox>
+    <description style="max-width: 520px; font-size: 12px; opacity: 0.8">
+      OpenAI examples: gpt-5.6-luna for fast skimming or gpt-5.6-terra for
+      higher-quality selection. For Anthropic, enter a Claude model ID available
+      to your account.
+    </description>
+  </vbox>
+
+  <hbox align="center">
+    <html:label
+      for="zotero-prefpane-__addonRef__-ollamaUrl"
+      data-l10n-id="pref-ollama-url"
+    ></html:label>
+    <html:input
+      type="text"
+      id="zotero-prefpane-__addonRef__-ollamaUrl"
+      preference="ollamaUrl"
+      style="width: 260px"
+    ></html:input>
+  </hbox>
+  <hbox align="center">
+    <html:label
+      for="zotero-prefpane-__addonRef__-skimModel"
+      data-l10n-id="pref-skim-model"
+    ></html:label>
+    <html:input
+      type="text"
+      id="zotero-prefpane-__addonRef__-skimModel"
+      preference="skimModel"
+    ></html:input>
+  </hbox>
+
+  <hbox align="center">
+    <html:label
+      for="zotero-prefpane-__addonRef__-tldrModel"
+      data-l10n-id="pref-tldr-model"
+    ></html:label>
+    <html:input
+      type="text"
+      id="zotero-prefpane-__addonRef__-tldrModel"
+      preference="tldrModel"
+    ></html:input>
+  </hbox>
+
+  <hbox align="center">
+    <html:label
+      for="zotero-prefpane-__addonRef__-numCtx"
+      data-l10n-id="pref-num-ctx"
+    ></html:label>
+    <html:input
+      type="number"
+      id="zotero-prefpane-__addonRef__-numCtx"
+      preference="numCtx"
+      min="2048"
+      step="1024"
+      style="width: 90px"
+    ></html:input>
+  </hbox>
+
+  <checkbox
+    id="zotero-prefpane-__addonRef__-enableSkim"
+    preference="enableSkim"
+    data-l10n-id="pref-enable-skim"
+  />
+  <checkbox
+    id="zotero-prefpane-__addonRef__-enableCitationCards"
+    preference="enableCitationCards"
+    data-l10n-id="pref-enable-citecards"
+  />
+  <checkbox
+    id="zotero-prefpane-__addonRef__-s2Metadata"
+    preference="s2Metadata"
+    data-l10n-id="pref-s2-metadata"
+  />
+
+  <vbox>
+    <html:label
+      for="zotero-prefpane-__addonRef__-customLabels"
+      data-l10n-id="pref-custom-labels"
+    ></html:label>
+    <html:textarea
+      id="zotero-prefpane-__addonRef__-customLabels"
+      rows="6"
+      style="width: 100%; font-family: monospace; font-size: 11px"
+    ></html:textarea>
+    <hbox align="center">
+      <button
+        id="zotero-prefpane-__addonRef__-saveLabels"
+        data-l10n-id="pref-save-labels"
+      />
+      <html:span
+        id="zotero-prefpane-__addonRef__-labels-result"
+        style="font-size: 12px; margin-inline-start: 8px"
+      ></html:span>
+    </hbox>
+  </vbox>
+
+  <hbox align="center">
+    <button
+      id="zotero-prefpane-__addonRef__-test"
+      data-l10n-id="pref-test-connection"
+    />
+    <html:span
+      id="zotero-prefpane-__addonRef__-test-result"
+      style="font-size: 12px; margin-inline-start: 8px"
+    ></html:span>
+  </hbox>
+</groupbox>
+<vbox>
+  <html:label
+    data-l10n-id="pref-help"
+    data-l10n-args='{"time": "__buildTime__","name": "__addonName__","version":"__buildVersion__"}'
+  ></html:label>
+</vbox>

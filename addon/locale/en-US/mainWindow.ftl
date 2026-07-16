@@ -1,0 +1,1 @@
+localreader-placeholder = Local Reader
