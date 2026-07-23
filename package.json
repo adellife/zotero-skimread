@@ -1,24 +1,24 @@
 {
-  "name": "zotero-local-reader",
+  "name": "zotero-skimread",
   "type": "module",
   "version": "0.1.0",
   "description": "Semantic Reader-style global skimming highlights for Zotero, private by default with optional structured cloud providers",
   "config": {
-    "addonName": "Local Reader",
-    "addonID": "local-reader@adel.tayebi.gmail.com",
-    "addonRef": "localreader",
-    "addonInstance": "LocalReader",
-    "prefsPrefix": "extensions.zotero.localreader"
+    "addonName": "SkimRead",
+    "addonID": "skimread@adellife.github.io",
+    "addonRef": "skimread",
+    "addonInstance": "SkimRead",
+    "prefsPrefix": "extensions.zotero.skimread"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/adellife/zotero-local-reader.git"
+    "url": "git+https://github.com/adellife/zotero-skimread.git"
   },
   "author": "Adel Tayebi",
   "bugs": {
-    "url": "https://github.com/adellife/zotero-local-reader/issues"
+    "url": "https://github.com/adellife/zotero-skimread/issues"
   },
-  "homepage": "https://github.com/adellife/zotero-local-reader#readme",
+  "homepage": "https://github.com/adellife/zotero-skimread#readme",
   "license": "AGPL-3.0-or-later",
   "scripts": {
     "start": "zotero-plugin serve",

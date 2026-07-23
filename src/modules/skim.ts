@@ -29,9 +29,13 @@ import {
   buildDocumentSelectionPrompt,
   buildDocumentSelectionSchema,
   buildSkimSystem,
+  buildTldrPrompt,
   parseCustomLabels,
   validateDiscovery,
   validateDocumentSelection,
+  validateTldr,
+  TLDR_SCHEMA,
+  TLDR_SYSTEM,
 } from "../prompts/skim";
 import {
   extractPage,
@@ -62,8 +66,12 @@ interface CachePayload {
   complete: boolean;
   /** how many of the segmented sentences have been classified so far */
   classifiedCount: number;
+  /** token budget used to compute chunk boundaries; kept stable for resume */
+  chunkBudget?: number;
   /** Keys created by the explicit “Save as Zotero annotations” action. */
   savedAnnotationKeys?: string[];
+  /** Cached TL;DR summary from the explicit “TL;DR” action. */
+  tldr?: string;
 }
 
 interface JobState {
@@ -132,7 +140,7 @@ function hiddenLabelKeys(): Set<string> {
 // ---------- cache ----------
 
 async function cacheDir(): Promise<string> {
-  const dir = PathUtils.join(Zotero.DataDirectory.dir, "localreader-cache");
+  const dir = PathUtils.join(Zotero.DataDirectory.dir, "skimread-cache");
   await IOUtils.makeDirectory(dir, { ignoreExisting: true });
   return dir;
 }
@@ -202,6 +210,30 @@ export async function cacheState(attachment: Zotero.Item): Promise<CacheState> {
 
 export async function hasCachedRun(attachment: Zotero.Item): Promise<boolean> {
   return (await cacheState(attachment)) !== "none";
+}
+
+export interface CacheSummary {
+  state: CacheState;
+  /** highlights kept (confidence >= 0.5, real label) */
+  selections: number;
+  /** sentences the model has looked at so far */
+  considered: number;
+}
+
+/** Persistent run summary for the sidebar's idle status line. */
+export async function cacheSummary(
+  attachment: Zotero.Item,
+): Promise<CacheSummary> {
+  const payload = await cacheRead(await cacheKey(attachment));
+  if (!payload) return { state: "none", selections: 0, considered: 0 };
+  const selections = payload.sentences.filter(
+    (sentence) => sentence.label !== "none" && sentence.confidence >= 0.5,
+  ).length;
+  return {
+    state: payload.complete ? "complete" : "partial",
+    selections,
+    considered: payload.classifiedCount,
+  };
 }
 
 export async function getCachedLabels(
@@ -285,10 +317,19 @@ function withDocumentSections(
 ): typeof sentences {
   const sections = new Map<number, DocumentSection>();
   let active: DocumentSection = "front matter";
+  let anyDetected = false;
   for (const p of pages) {
     const detected = sectionAtPageStart(p);
-    if (detected) active = detected;
+    if (detected) {
+      active = detected;
+      anyDetected = true;
+    }
     sections.set(p.pageIndex, active);
+  }
+  // Documents without recognizable headings (many books, slides, reports)
+  // must not end up wholly labeled "front matter": treat them as body text.
+  if (!anyDetected) {
+    for (const p of pages) sections.set(p.pageIndex, "body");
   }
   return sentences.map((sentence) => ({
     ...sentence,
@@ -297,11 +338,19 @@ function withDocumentSections(
 }
 
 /**
- * Reference lists are never candidates. Full-context selection never silently
- * truncates the main paper: callers separately check the provider budget.
+ * Reference lists and front matter (title, author block, journal banner) are
+ * never candidates — highlighting the paper's own title helps nobody.
+ * Full-context selection never silently truncates the main paper: callers
+ * separately check the provider budget.
  */
 function limitWork(sentences: ExtractedSentence[]): ExtractedSentence[] {
-  return sentences.filter((sentence) => sentence.section !== "references");
+  const filtered = sentences.filter(
+    (sentence) =>
+      sentence.section !== "references" && sentence.section !== "front matter",
+  );
+  // Never filter a document down to nothing — better to consider everything
+  // than to complete a run with zero candidates.
+  return filtered.length ? filtered : sentences;
 }
 
 // ---------- zero-shot label discovery ----------
@@ -335,7 +384,7 @@ async function discoverLabels(
       const labels = validateDiscovery(raw);
       if (labels) return labels;
     } catch (e) {
-      ztoolkit.log("localreader discovery error", e);
+      ztoolkit.log("skimread discovery error", e);
     }
   }
   return null;
@@ -354,6 +403,59 @@ function estimateTokens(sentences: ExtractedSentence[]): number {
   );
 }
 
+/**
+ * Sentence-token budget per selection call. The prompt/schema/output reserve
+ * scales down for small local contexts (never more than 40% of the window)
+ * and the result is floored so a misconfigured context still makes progress.
+ */
+export function selectionBudget(): number {
+  const limit = contextLimitTokens();
+  const reserve = Math.min(CONTEXT_RESERVE_TOKENS, Math.floor(limit * 0.4));
+  return Math.max(1024, limit - reserve);
+}
+
+/**
+ * Split the document into the fewest context-sized chunks, preferring to cut
+ * where the section changes (chapter boundaries in books) and otherwise at
+ * page breaks, so each model call still sees a coherent stretch of text.
+ * A short paper stays a single chunk — identical to the pre-chunking design.
+ */
+export function chunkSentences(
+  sentences: ExtractedSentence[],
+  budgetTokens: number,
+): ExtractedSentence[][] {
+  const chunks: ExtractedSentence[][] = [];
+  let current: ExtractedSentence[] = [];
+  let currentTokens = 0;
+  let lastBoundary = 0; // index in `current` of the most recent section/page change
+
+  for (const sentence of sentences) {
+    const cost = estimateTokens([sentence]);
+    const prev = current[current.length - 1];
+    if (
+      prev &&
+      (prev.section !== sentence.section ||
+        prev.pageIndex !== sentence.pageIndex)
+    ) {
+      lastBoundary = current.length;
+    }
+    if (current.length && currentTokens + cost > budgetTokens) {
+      // Cut at the last natural boundary when it is not too early in the
+      // chunk; otherwise cut right here.
+      const cut =
+        lastBoundary > current.length * 0.4 ? lastBoundary : current.length;
+      chunks.push(current.slice(0, cut));
+      current = current.slice(cut);
+      currentTokens = estimateTokens(current);
+      lastBoundary = 0;
+    }
+    current.push(sentence);
+    currentTokens += cost;
+  }
+  if (current.length) chunks.push(current);
+  return chunks;
+}
+
 async function selectDocument(
   labels: LabelDef[],
   sentences: ExtractedSentence[],
@@ -361,10 +463,12 @@ async function selectDocument(
 ): Promise<ClassifiedSentence[]> {
   const model = modelForProvider(String(getPref("skimModel")));
   const estimate = estimateTokens(sentences);
-  const limit = contextLimitTokens() - CONTEXT_RESERVE_TOKENS;
-  if (estimate > limit) {
+  // Defensive: chunkSentences() sizes chunks to this same budget, so this
+  // only triggers if a caller bypasses chunking. 1.2 allows the greedy
+  // chunker's boundary-preserving overshoot.
+  if (estimate > selectionBudget() * 1.2) {
     throw new Error(
-      `Full document needs about ${estimate.toLocaleString()} tokens, but ${providerLabel()} is configured for ${contextLimitTokens().toLocaleString()}. Increase the context setting or choose a larger-context provider.`,
+      `Chunk needs about ${estimate.toLocaleString()} tokens, but ${providerLabel()} is configured for ${contextLimitTokens().toLocaleString()}.`,
     );
   }
   const system = buildSkimSystem(labels);
@@ -372,7 +476,9 @@ async function selectDocument(
   const user = buildDocumentSelectionPrompt(
     sentences.map((sentence, id) => ({ ...sentence, id })),
     MAX_HIGHLIGHTS_PER_PAGE,
+    labels,
   );
+  let lastError = "";
   for (let attempt = 0; attempt < 2; attempt++) {
     if (isCancelled()) return [];
     try {
@@ -386,17 +492,27 @@ async function selectDocument(
         schema,
       });
       const selected = validateDocumentSelection(raw, labels, sentences.length);
-      if (!selected) continue;
+      if (!selected) {
+        lastError = "response did not match the required schema";
+        continue;
+      }
       return selected.map((result) => ({
         ...sentences[result.id],
         label: result.label,
         confidence: result.importance,
       }));
     } catch (error) {
-      ztoolkit.log("localreader document selection error", error);
+      // Surface the provider's own message (e.g. an unknown model id or a
+      // login prompt) instead of hiding it behind a generic failure.
+      lastError = String((error as Error)?.message || error);
+      ztoolkit.log("skimread document selection error", error);
     }
   }
-  throw new Error("Model could not return a valid full-document selection");
+  throw new Error(
+    lastError
+      ? `${providerLabel()} selection failed: ${lastError.slice(0, 160)}`
+      : "Model could not return a valid full-document selection",
+  );
 }
 
 // ---------- selection & painting ----------
@@ -480,6 +596,137 @@ export async function saveSkimAsAnnotations(
   return { saved: keys.length, alreadySaved: false };
 }
 
+// ---------- TL;DR summary ----------
+
+const TLDR_INPUT_CHARS = 14000; // title + lead of the paper, kept well within context
+
+/** Return an already-cached TL;DR without contacting the model. */
+export async function getCachedTldr(
+  attachment: Zotero.Item,
+): Promise<string | null> {
+  return (await cacheRead(await cacheKey(attachment)))?.tldr ?? null;
+}
+
+/** One structured summarization call (with a single repair retry). */
+async function summarizeText(
+  title: string,
+  text: string,
+  model: string,
+): Promise<string> {
+  let tldr: string | null = null;
+  for (let attempt = 0; attempt < 2 && !tldr; attempt++) {
+    try {
+      const raw = await chatJSON({
+        model,
+        system: TLDR_SYSTEM,
+        user:
+          (attempt ? "Return only valid JSON matching the schema.\n\n" : "") +
+          buildTldrPrompt(title, text),
+        schema: TLDR_SCHEMA,
+      });
+      tldr = validateTldr(raw);
+    } catch (error) {
+      ztoolkit.log("skimread tldr error", error);
+    }
+  }
+  if (!tldr)
+    throw new Error(`${providerLabel()} did not return a usable TL;DR`);
+  return tldr;
+}
+
+/** Collect the leading text of a paper, reusing already-extracted pages. */
+function leadingText(
+  reader: any,
+  cachedPages?: Map<number, PageText>,
+): Promise<string> {
+  return (async () => {
+    let text = "";
+    const pageCount = getPageCount(reader);
+    for (let p = 0; p < pageCount && text.length < TLDR_INPUT_CHARS; p++) {
+      if (!isReaderAlive(reader)) throw new Error("Paper was closed");
+      const page = cachedPages?.get(p) ?? (await extractPage(reader, p));
+      if (page?.text) text += page.text + "\n";
+    }
+    return text.slice(0, TLDR_INPUT_CHARS).trim();
+  })();
+}
+
+async function persistTldr(
+  key: string,
+  attachment: Zotero.Item,
+  tldr: string,
+): Promise<void> {
+  let payload = await cacheRead(key);
+  if (!payload) {
+    payload = {
+      promptVersion: PROMPT_VERSION,
+      model: modelForProvider(String(getPref("skimModel"))),
+      labels: getConfiguredLabels() ?? DEFAULT_LABELS,
+      sentences: [],
+      complete: false,
+      classifiedCount: 0,
+    };
+  }
+  payload.tldr = tldr;
+  await cacheWrite(key, payload);
+}
+
+/**
+ * Generate a short TL;DR of the paper with the configured TL;DR model. Uses
+ * the document's title and leading text (abstract/intro), never fabricating
+ * content. Result is cached alongside the skim run; `force` re-summarizes.
+ */
+export async function generateTldr(
+  reader: any,
+  attachment: Zotero.Item,
+  onStatus: (msg: string) => void,
+  force = false,
+): Promise<string> {
+  const key = await cacheKey(attachment);
+  const existing = await cacheRead(key);
+  if (!force && existing?.tldr) return existing.tldr;
+
+  onStatus("Reading document…");
+  const text = await leadingText(reader);
+  if (!text) throw new Error("No extractable text (scanned PDF?)");
+  const title = String(attachment.getField("title") || "").trim();
+  const model = modelForProvider(
+    String(getPref("tldrModel") || getPref("skimModel")),
+  );
+  onStatus("Summarizing…");
+  const tldr = await summarizeText(title, text, model);
+  await persistTldr(key, attachment, tldr);
+  return tldr;
+}
+
+/**
+ * Save the current TL;DR as a Zotero note attached to the paper. This is an
+ * explicit user action — the only place, besides annotation export, where the
+ * plugin writes to the library.
+ */
+export async function saveTldrAsNote(
+  attachment: Zotero.Item,
+): Promise<"saved" | "none"> {
+  const tldr = await getCachedTldr(attachment);
+  if (!tldr) return "none";
+  const parentID = attachment.parentItemID || attachment.id;
+  const note = new Zotero.Item("note");
+  note.libraryID = attachment.libraryID;
+  note.parentID = parentID;
+  const title = String(attachment.getField("title") || "").trim();
+  const escaped = tldr
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  note.setNote(
+    `<h2>SkimRead TL;DR</h2>${
+      title ? `<p><em>${title}</em></p>` : ""
+    }<p>${escaped}</p>`,
+  );
+  await note.saveTx();
+  return "saved";
+}
+
 // ---------- public API ----------
 
 export function isRunning(tabID: string): boolean {
@@ -502,6 +749,7 @@ export interface RunCallbacks {
   onError: (msg: string) => void;
   onCounts?: (counts: Record<string, number>) => void;
   onLabels?: (labels: LabelDef[]) => void;
+  onTldr?: (tldr: string) => void;
 }
 
 /**
@@ -601,25 +849,74 @@ export async function runSkim(
     if (job.cancelled) return;
     cb.onLabels?.(labels);
 
-    // ---- full-document selection ----
-    cb.onStatus(`Selecting from all ${sentences.length} sentences…`);
-    const selected = await selectDocument(
-      labels,
-      sentences,
-      () => job.cancelled || !isReaderAlive(reader),
-    );
+    // ---- document selection (single chunk for papers; chapter/context-sized
+    // chunks for books and small-context providers) ----
+    const budget = payload.chunkBudget ?? selectionBudget();
+    payload.chunkBudget = budget;
+    const chunks = chunkSentences(sentences, budget);
+    const isCancelled = () => job.cancelled || !isReaderAlive(reader);
+
+    // Resume: skip chunks whose sentences were already consumed. Chunking is
+    // deterministic for the same extraction, settings, and prompt version.
+    let consumed = 0;
+    let startChunk = 0;
+    while (
+      startChunk < chunks.length &&
+      consumed + chunks[startChunk].length <= payload.classifiedCount
+    ) {
+      consumed += chunks[startChunk].length;
+      startChunk++;
+    }
+
+    for (let index = startChunk; index < chunks.length; index++) {
+      if (isCancelled()) break;
+      const chunk = chunks[index];
+      cb.onStatus(
+        chunks.length === 1
+          ? `Selecting from all ${sentences.length} sentences…`
+          : `Selecting highlights — part ${index + 1} of ${chunks.length} (${chunk.length} sentences)…`,
+      );
+      const selected = await selectDocument(labels, chunk, isCancelled);
+      if (isCancelled()) break;
+      payload.sentences.push(...selected);
+      consumed += chunk.length;
+      payload.classifiedCount = consumed;
+      await cacheWrite(key, payload);
+      await paint(payload); // progressive: chapters appear as they finish
+    }
 
     if (job.cancelled || !isReaderAlive(reader)) {
-      cb.onError("Stopped");
+      cb.onError("Stopped — progress saved, Generate resumes");
       return;
     }
-    payload.sentences = selected;
-    payload.classifiedCount = sentences.length;
     payload.complete = true;
     await cacheWrite(key, payload);
     cb.onDone(await paint(payload));
+
+    // Optional: produce the TL;DR in the same run, with the same (skim) model,
+    // reusing the text already extracted above — no second model load.
+    if (getPref("tldrWithSkim") && !payload.tldr && !isCancelled()) {
+      try {
+        cb.onStatus("Summarizing (TL;DR)…");
+        const title = String(attachment.getField("title") || "").trim();
+        const text = await leadingText(reader, job.pageCache);
+        if (text) {
+          const tldr = await summarizeText(
+            title,
+            text,
+            modelForProvider(String(getPref("skimModel"))),
+          );
+          payload.tldr = tldr;
+          await cacheWrite(key, payload);
+          cb.onTldr?.(tldr);
+        }
+      } catch (tldrError) {
+        // A TL;DR failure must never fail the highlight run.
+        ztoolkit.log("skimread inline tldr error", tldrError);
+      }
+    }
   } catch (e) {
-    ztoolkit.log("localreader skim error", e);
+    ztoolkit.log("skimread skim error", e);
     cb.onError(String((e as Error)?.message || e).slice(0, 140));
   } finally {
     job.running = false;

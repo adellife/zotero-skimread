@@ -14,15 +14,15 @@ declare namespace _ZoteroTypes {
       "codexPath": string;
       "codexModel": string;
       "codexReasoning": string;
+      "claudeModel": string;
+      "claudePath": string;
       "cloudConsent": boolean;
       "cloudContextTokens": number;
       "maxOutputTokens": number;
       "numCtx": number;
       "skimModel": string;
       "tldrModel": string;
-      "enableSkim": boolean;
-      "enableCitationCards": boolean;
-      "s2Metadata": boolean;
+      "tldrWithSkim": boolean;
       "highlightDensity": number;
       "highlightOpacity": number;
       "showFlags": boolean;

@@ -9,20 +9,24 @@
   <hbox align="center">
     <html:label
       for="zotero-prefpane-__addonRef__-apiType"
-      data-l10n-id="pref-api-type"
+      data-l10n-id="pref-provider"
     ></html:label>
-    <menulist id="zotero-prefpane-__addonRef__-apiType" style="width: 280px">
+    <menulist id="zotero-prefpane-__addonRef__-apiType" style="width: 340px">
       <menupopup>
-        <menuitem label="Ollama (local)" value="ollama" />
+        <menuitem label="Ollama — local" value="ollama" />
         <menuitem
-          label="OpenAI-compatible local server (vLLM, llama.cpp, LM Studio)"
+          label="OpenAI-compatible server — local or remote (vLLM, LM Studio, OpenRouter)"
           value="openai-compatible"
         />
-        <menuitem label="OpenAI API (cloud)" value="openai-api" />
-        <menuitem label="Anthropic API (cloud)" value="anthropic" />
+        <menuitem label="OpenAI API — cloud" value="openai-api" />
+        <menuitem label="Anthropic API — cloud" value="anthropic" />
         <menuitem
-          label="Codex App Server (ChatGPT login)"
+          label="Codex App Server — ChatGPT login"
           value="codex-app-server"
+        />
+        <menuitem
+          label="Claude Code — Claude subscription login"
+          value="claude-code"
         />
       </menupopup>
     </menulist>
@@ -33,7 +37,7 @@
     style="display: none; gap: 8px"
   >
     <description style="max-width: 520px; color: #9a3412">
-      Cloud mode sends extracted PDF text to the selected provider. Local Reader
+      Cloud mode sends extracted PDF text to the selected provider. SkimRead
       never falls back to cloud automatically.
     </description>
     <checkbox
@@ -107,6 +111,40 @@
         />
       </hbox>
     </vbox>
+    <vbox id="zotero-prefpane-__addonRef__-claude-settings" style="gap: 8px">
+      <description style="max-width: 520px">
+        Uses your local Claude Code session (a Claude Pro/Max subscription). Run
+        <html:code>claude login</html:code>
+        first. SkimRead runs the CLI headlessly for one structured request with
+        tools disabled; it does not expose Zotero, your files, or commands to
+        Claude, and reads no API key.
+      </description>
+      <hbox align="center">
+        <html:label for="zotero-prefpane-__addonRef__-claudeModel"
+          >Claude model</html:label
+        >
+        <html:input
+          type="text"
+          id="zotero-prefpane-__addonRef__-claudeModel"
+          preference="claudeModel"
+          style="width: 220px"
+        />
+      </hbox>
+      <hbox align="center">
+        <html:label for="zotero-prefpane-__addonRef__-claudePath"
+          >Claude CLI path</html:label
+        >
+        <html:input
+          type="text"
+          id="zotero-prefpane-__addonRef__-claudePath"
+          preference="claudePath"
+          style="width: 260px"
+        />
+      </hbox>
+      <description style="max-width: 520px; font-size: 12px; opacity: 0.8">
+        Model can be an alias like sonnet or opus, or a full model ID.
+      </description>
+    </vbox>
     <hbox align="center">
       <html:label for="zotero-prefpane-__addonRef__-cloudContextTokens"
         >Cloud context budget (tokens)</html:label
@@ -140,7 +178,7 @@
     </description>
   </vbox>
 
-  <hbox align="center">
+  <hbox id="zotero-prefpane-__addonRef__-url-row" align="center">
     <html:label
       for="zotero-prefpane-__addonRef__-ollamaUrl"
       data-l10n-id="pref-ollama-url"
@@ -152,7 +190,7 @@
       style="width: 260px"
     ></html:input>
   </hbox>
-  <hbox align="center">
+  <hbox id="zotero-prefpane-__addonRef__-skim-model-row" align="center">
     <html:label
       for="zotero-prefpane-__addonRef__-skimModel"
       data-l10n-id="pref-skim-model"
@@ -164,7 +202,7 @@
     ></html:input>
   </hbox>
 
-  <hbox align="center">
+  <hbox id="zotero-prefpane-__addonRef__-tldr-model-row" align="center">
     <html:label
       for="zotero-prefpane-__addonRef__-tldrModel"
       data-l10n-id="pref-tldr-model"
@@ -176,7 +214,7 @@
     ></html:input>
   </hbox>
 
-  <hbox align="center">
+  <hbox id="zotero-prefpane-__addonRef__-num-ctx-row" align="center">
     <html:label
       for="zotero-prefpane-__addonRef__-numCtx"
       data-l10n-id="pref-num-ctx"
@@ -190,22 +228,6 @@
       style="width: 90px"
     ></html:input>
   </hbox>
-
-  <checkbox
-    id="zotero-prefpane-__addonRef__-enableSkim"
-    preference="enableSkim"
-    data-l10n-id="pref-enable-skim"
-  />
-  <checkbox
-    id="zotero-prefpane-__addonRef__-enableCitationCards"
-    preference="enableCitationCards"
-    data-l10n-id="pref-enable-citecards"
-  />
-  <checkbox
-    id="zotero-prefpane-__addonRef__-s2Metadata"
-    preference="s2Metadata"
-    data-l10n-id="pref-s2-metadata"
-  />
 
   <vbox>
     <html:label

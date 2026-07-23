@@ -4,6 +4,7 @@ import {
   buildDocumentSelectionPrompt,
   validateDocumentSelection,
 } from "../src/prompts/skim";
+import { chunkSentences } from "../src/modules/skim";
 
 describe("document selection", function () {
   it("keeps stable IDs and page context in the full-document prompt", function () {
@@ -48,8 +49,8 @@ describe("document selection", function () {
     ]);
   });
 
-  it("rejects duplicate, out-of-range, and unknown-label selections", function () {
-    assert.isNull(
+  it("keeps the first of duplicate ids and drops later ones", function () {
+    assert.deepEqual(
       validateDocumentSelection(
         {
           selected: [
@@ -60,7 +61,11 @@ describe("document selection", function () {
         DEFAULT_LABELS,
         2,
       ),
+      [{ id: 0, label: "goal", importance: 0.8 }],
     );
+  });
+
+  it("returns null when nothing is usable (out-of-range or unknown label)", function () {
     assert.isNull(
       validateDocumentSelection(
         { selected: [{ id: 2, label: "goal", importance: 0.8 }] },
@@ -75,5 +80,99 @@ describe("document selection", function () {
         2,
       ),
     );
+  });
+
+  it("tolerates string ids, aliased score fields, and label casing", function () {
+    assert.deepEqual(
+      validateDocumentSelection(
+        {
+          selected: [
+            { id: "1", label: "Goal", confidence: 0.6 },
+            { id: 0, label: "method" },
+          ],
+        },
+        DEFAULT_LABELS,
+        3,
+      ),
+      [
+        { id: 1, label: "goal", importance: 0.6 },
+        { id: 0, label: "method", importance: 0.7 },
+      ],
+    );
+  });
+
+  describe("chunked selection for long documents", function () {
+    const sentence = (
+      pageIndex: number,
+      section:
+        | "front matter"
+        | "abstract"
+        | "introduction"
+        | "methods"
+        | "results"
+        | "discussion"
+        | "conclusion"
+        | "appendix"
+        | "references"
+        | "body",
+      text: string,
+    ) => ({ pageIndex, startChar: 0, endChar: text.length, text, section });
+
+    it("keeps a short document in a single chunk", async function () {
+      const sentences = [
+        sentence(0, "abstract", "A".repeat(100)),
+        sentence(1, "introduction", "B".repeat(100)),
+      ];
+      const chunks = chunkSentences(sentences, 10_000);
+      assert.lengthOf(chunks, 1);
+      assert.lengthOf(chunks[0], 2);
+    });
+
+    it("splits an oversized document, preserving order and completeness", async function () {
+      const sentences = [];
+      for (let page = 0; page < 30; page++) {
+        const section = page < 15 ? "introduction" : "discussion";
+        for (let index = 0; index < 5; index++) {
+          sentences.push(
+            sentence(page, section, `p${page}s${index} ` + "x".repeat(200)),
+          );
+        }
+      }
+      const budget = 1500;
+      const chunks = chunkSentences(sentences, budget);
+      assert.isAbove(chunks.length, 1);
+      // completeness + order
+      const flattened = chunks.flat();
+      assert.lengthOf(flattened, sentences.length);
+      flattened.forEach((entry, index) =>
+        assert.strictEqual(entry.text, sentences[index].text),
+      );
+      // every chunk respects the budget (chars/3.5 estimate + 20 overhead)
+      for (const chunk of chunks) {
+        const estimate = Math.ceil(
+          chunk.reduce((total, s) => total + s.text.length + 20, 0) / 3.5,
+        );
+        assert.isAtMost(estimate, budget);
+      }
+    });
+
+    it("prefers section boundaries when cutting", async function () {
+      const sentences = [
+        ...Array.from({ length: 8 }, (_, index) =>
+          sentence(0, "introduction", `intro ${index} ` + "x".repeat(150)),
+        ),
+        ...Array.from({ length: 8 }, (_, index) =>
+          sentence(1, "methods", `methods ${index} ` + "x".repeat(150)),
+        ),
+      ];
+      // Budget fits ~12 sentences; the boundary after intro (index 8) is past
+      // 40% of the chunk, so the cut should land exactly there.
+      const chunks = chunkSentences(sentences, 600);
+      assert.strictEqual(
+        chunks[0][chunks[0].length - 1].section,
+        "introduction",
+      );
+      assert.strictEqual(chunks[1]?.[0]?.section, "methods");
+    });
   });
 });

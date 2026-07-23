@@ -13,7 +13,7 @@ export function registerPrefsPane() {
     pluginID: config.addonID,
     src: rootURI + "content/preferences.xhtml",
     label: getString("prefs-title"),
-    image: `chrome://${config.addonRef}/content/icons/favicon.png`,
+    image: `chrome://${config.addonRef}/content/icons/skimread-icon.png`,
   });
 }
 
@@ -48,37 +48,54 @@ export function onPrefsLoad(window: Window) {
     });
   }
 
-  // --- API type selector ---
+  // --- Provider selector: one flat list, with only the relevant fields shown.
   const sel = $("apiType") as (HTMLElement & { value: string }) | null;
   if (sel) {
     sel.value = String(getPref("apiType") || "ollama");
-    const updateProviderFields = () => {
-      const cloud =
-        sel.value === "openai-api" ||
-        sel.value === "anthropic" ||
-        sel.value === "codex-app-server";
-      const cloudSettings = $("cloud-settings") as HTMLElement | null;
-      const openAIKey = $("openai-key-row") as HTMLElement | null;
-      const anthropicKey = $("anthropic-key-row") as HTMLElement | null;
-      const codexSettings = $("codex-settings") as HTMLElement | null;
-      if (cloudSettings) cloudSettings.style.display = cloud ? "flex" : "none";
-      if (openAIKey)
-        openAIKey.style.display = sel.value === "openai-api" ? "flex" : "none";
-      if (anthropicKey)
-        anthropicKey.style.display =
-          sel.value === "anthropic" ? "flex" : "none";
-      if (codexSettings)
-        codexSettings.style.display =
-          sel.value === "codex-app-server" ? "flex" : "none";
+
+    // Which field rows each provider needs.
+    const usesUrl = new Set(["ollama", "openai-compatible"]);
+    const usesLocalModels = new Set([
+      "ollama",
+      "openai-compatible",
+      "openai-api",
+      "anthropic",
+    ]);
+    const usesNumCtx = new Set(["ollama"]);
+    const isCloud = new Set([
+      "openai-api",
+      "anthropic",
+      "codex-app-server",
+      "claude-code",
+    ]);
+
+    const set = (id: string, show: boolean) => {
+      const el = $(id) as HTMLElement | null;
+      if (el) el.style.display = show ? "flex" : "none";
     };
-    updateProviderFields();
-    const saveProvider = () => {
+
+    const refresh = () => {
+      const p = sel.value;
+      set("url-row", usesUrl.has(p));
+      set("skim-model-row", usesLocalModels.has(p));
+      set("tldr-model-row", usesLocalModels.has(p));
+      set("num-ctx-row", usesNumCtx.has(p));
+      set("cloud-settings", isCloud.has(p));
+      set("openai-key-row", p === "openai-api");
+      set("anthropic-key-row", p === "anthropic");
+      set("codex-settings", p === "codex-app-server");
+      set("claude-settings", p === "claude-code");
+    };
+
+    const save = () => {
       setPref("apiType", sel.value);
-      updateProviderFields();
+      refresh();
     };
+
+    refresh();
     // Native XUL menulists emit `command`; HTML selects emit `change`.
-    sel.addEventListener("command", saveProvider);
-    sel.addEventListener("change", saveProvider);
+    sel.addEventListener("command", save);
+    sel.addEventListener("change", save);
   }
 
   // --- custom labels editor ---

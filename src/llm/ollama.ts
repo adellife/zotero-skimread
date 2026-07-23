@@ -19,7 +19,8 @@ type ApiType =
   | "openai-compatible"
   | "openai-api"
   | "anthropic"
-  | "codex-app-server";
+  | "codex-app-server"
+  | "claude-code";
 
 interface RequestOptions {
   headers?: Record<string, string>;
@@ -35,7 +36,8 @@ function apiType(): ApiType {
   if (
     value === "openai-api" ||
     value === "anthropic" ||
-    value === "codex-app-server"
+    value === "codex-app-server" ||
+    value === "claude-code"
   ) {
     return value;
   }
@@ -52,16 +54,24 @@ export function providerLabel(): string {
       return "Anthropic API";
     case "codex-app-server":
       return "Codex App Server";
+    case "claude-code":
+      return "Claude Code";
     default:
       return "Ollama";
   }
+}
+
+/** Providers that run a local CLI subprocess instead of an HTTP endpoint. */
+function isSubprocessProvider(): boolean {
+  return apiType() === "codex-app-server" || apiType() === "claude-code";
 }
 
 function isCloudProvider(): boolean {
   return (
     apiType() === "openai-api" ||
     apiType() === "anthropic" ||
-    apiType() === "codex-app-server"
+    apiType() === "codex-app-server" ||
+    apiType() === "claude-code"
   );
 }
 
@@ -98,19 +108,19 @@ function assertLocalhost(url: string) {
 function cloudHeaders(): Record<string, string> {
   if (!getPref("cloudConsent")) {
     throw new Error(
-      "Cloud inference is disabled. Confirm that extracted PDF text may leave this computer in Local Reader settings.",
+      "Cloud inference is disabled. Confirm that extracted PDF text may leave this computer in SkimRead settings.",
     );
   }
   if (apiType() === "openai-api") {
     const key = String(getPref("openaiApiKey") || "").trim();
-    if (!key)
-      throw new Error("Enter an OpenAI API key in Local Reader settings.");
+    if (!key) throw new Error("Enter an OpenAI API key in SkimRead settings.");
     return { Authorization: `Bearer ${key}` };
   }
-  if (apiType() === "codex-app-server") return {};
+  // Subprocess providers (Codex, Claude Code) authenticate via their own CLI
+  // login, so there is no API key to attach — only consent is required.
+  if (isSubprocessProvider()) return {};
   const key = String(getPref("anthropicApiKey") || "").trim();
-  if (!key)
-    throw new Error("Enter an Anthropic API key in Local Reader settings.");
+  if (!key) throw new Error("Enter an Anthropic API key in SkimRead settings.");
   return {
     "x-api-key": key,
     "anthropic-version": "2023-06-01",
@@ -145,7 +155,56 @@ export function modelForProvider(configuredModel: string): string {
   if (apiType() === "codex-app-server") {
     return String(getPref("codexModel") || "").trim();
   }
+  if (apiType() === "claude-code") {
+    return String(getPref("claudeModel") || "").trim();
+  }
   return configuredModel.trim();
+}
+
+/**
+ * Parse JSON that a model may have wrapped in prose, code fences, or trailing
+ * text. Tries a strict parse first, then extracts the first balanced JSON
+ * object/array (string- and escape-aware) and parses that.
+ */
+export function parseLooseJSON(raw: string): unknown {
+  const trimmed = raw.trim();
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    // fall through to tolerant extraction
+  }
+  const objAt = trimmed.indexOf("{");
+  const arrAt = trimmed.indexOf("[");
+  let start = -1;
+  let open = "{";
+  let close = "}";
+  if (objAt >= 0 && (arrAt < 0 || objAt < arrAt)) {
+    start = objAt;
+  } else if (arrAt >= 0) {
+    start = arrAt;
+    open = "[";
+    close = "]";
+  }
+  if (start < 0) throw new Error("No JSON found in the model response");
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < trimmed.length; i++) {
+    const ch = trimmed[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) return JSON.parse(trimmed.slice(start, i + 1));
+    }
+  }
+  throw new Error("Incomplete JSON in the model response");
 }
 
 function readOpenAIResponseText(response: unknown): string | null {
@@ -173,7 +232,7 @@ interface CodexPipe {
 }
 
 interface CodexSubprocess {
-  stdin: { write(value: string): void };
+  stdin: { write(value: string): void | Promise<unknown>; close?(): void };
   stdout: CodexPipe;
   stderr?: CodexPipe;
   kill(): void;
@@ -264,12 +323,12 @@ class CodexAppServerClient {
       });
     } catch (error) {
       throw new Error(
-        `Could not start Codex App Server (${command}). Run codex login and set the Codex CLI path in Local Reader settings. ${String(error)}`,
+        `Could not start Codex App Server (${command}). Run codex login and set the Codex CLI path in SkimRead settings. ${String(error)}`,
       );
     }
     const client = new CodexAppServerClient(process);
     await client.request("initialize", {
-      clientInfo: { name: "local-reader", version: "0.8.0" },
+      clientInfo: { name: "skimread", version: "0.8.0" },
       capabilities: { experimentalApi: false },
     });
     client.notify("initialized");
@@ -376,10 +435,10 @@ class CodexAppServerClient {
       return;
     }
     if (typeof message.id === "number" && typeof message.method === "string") {
-      // Local Reader never grants Codex tools, filesystem access, or Zotero MCP.
+      // SkimRead never grants Codex tools, filesystem access, or Zotero MCP.
       this.write({
         id: message.id,
-        error: { code: -32601, message: "Tools are disabled in Local Reader." },
+        error: { code: -32601, message: "Tools are disabled in SkimRead." },
       });
       return;
     }
@@ -411,6 +470,142 @@ async function resolveCodexCommand(): Promise<string> {
     }
   }
   return configured || "codex";
+}
+
+// ---------- Claude Code (subscription login via the `claude` CLI) ----------
+
+function homeDir(): string {
+  try {
+    const services = (globalThis as { Services?: unknown }).Services as {
+      dirsvc?: { get(prop: string, type: unknown): { path?: string } };
+    };
+    const ci = (globalThis as { Ci?: { nsIFile?: unknown } }).Ci;
+    const file = services?.dirsvc?.get("Home", ci?.nsIFile);
+    return typeof file?.path === "string" ? file.path : "";
+  } catch {
+    return "";
+  }
+}
+
+async function resolveClaudeCommand(): Promise<string> {
+  const configured = String(getPref("claudePath") || "").trim();
+  const home = homeDir();
+  const candidates = [
+    configured,
+    home ? PathUtils.join(home, ".local", "bin", "claude") : "",
+    home ? PathUtils.join(home, ".claude", "local", "claude") : "",
+    "/opt/homebrew/bin/claude",
+    "/usr/local/bin/claude",
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    try {
+      if (await IOUtils.exists(candidate)) return candidate;
+    } catch {
+      // Keep trying the remaining known locations.
+    }
+  }
+  return configured || "claude";
+}
+
+/**
+ * One-shot structured call through the local `claude` CLI in headless print
+ * mode. Authentication is whatever `claude` is already logged into (a Claude
+ * Pro/Max subscription); no API key is read or stored. Tools are disabled so
+ * Claude cannot touch the filesystem or run commands — it only returns text.
+ */
+async function claudeCodeJSON(opts: {
+  model: string;
+  system: string;
+  user: string;
+}): Promise<unknown> {
+  cloudHeaders(); // enforces explicit consent (returns {} for subprocess mode)
+  const model = modelForProvider(opts.model);
+  if (!model) throw new Error("Enter a Claude model in SkimRead settings.");
+  const Subprocess = await loadCodexSubprocess();
+  const command = await resolveClaudeCommand();
+  const args = [
+    "-p",
+    "--output-format",
+    "json",
+    "--model",
+    model,
+    "--append-system-prompt",
+    `${opts.system}\n\nReturn only the requested JSON. Do not use tools, read files, run commands, or add commentary.`,
+    "--allowedTools",
+    "",
+  ];
+  let process: CodexSubprocess;
+  try {
+    process = await Subprocess.call({
+      command,
+      arguments: args,
+      stderr: "pipe",
+    });
+  } catch (error) {
+    throw new Error(
+      `Could not start Claude Code (${command}). Install Claude Code, run claude login, and set the Claude CLI path in SkimRead settings. ${String(error)}`,
+    );
+  }
+  try {
+    // Feed the prompt on stdin in chunks so a large document cannot deadlock
+    // the pipe, then close stdin to signal end-of-input.
+    const CHUNK = 32000;
+    for (let i = 0; i < opts.user.length; i += CHUNK) {
+      await process.stdin.write(opts.user.slice(i, i + CHUNK));
+    }
+    process.stdin.close?.();
+    let out = "";
+    for (;;) {
+      const chunk = await process.stdout.readString();
+      if (!chunk) break;
+      out += chunk;
+    }
+    // The CLI may emit an update notice before the JSON envelope; extract it
+    // tolerantly rather than parsing the whole stdout.
+    const envelope = parseLooseJSON(out) as {
+      result?: unknown;
+      is_error?: unknown;
+      error?: unknown;
+    };
+    if (envelope.is_error) {
+      // The CLI puts the human-readable reason (e.g. "Not logged in · Please
+      // run /login") in `result`; prefer it over a generic message.
+      throw new Error(
+        String(
+          envelope.result || envelope.error || "Claude Code reported an error",
+        ),
+      );
+    }
+    const text = envelope.result;
+    if (typeof text !== "string" || !text.trim()) {
+      throw new Error("Claude Code returned no result");
+    }
+    // The model's text may include prose or code fences around the JSON.
+    return parseLooseJSON(text);
+  } finally {
+    try {
+      process.kill();
+    } catch {
+      // Already exited.
+    }
+  }
+}
+
+async function claudeVersion(): Promise<string> {
+  const Subprocess = await loadCodexSubprocess();
+  const command = await resolveClaudeCommand();
+  const process = await Subprocess.call({
+    command,
+    arguments: ["--version"],
+    stderr: "pipe",
+  });
+  let out = "";
+  for (;;) {
+    const chunk = await process.stdout.readString();
+    if (!chunk) break;
+    out += chunk;
+  }
+  return out.trim() || "Claude Code";
 }
 
 function responseID(result: unknown, key: "thread" | "turn"): string {
@@ -487,8 +682,7 @@ async function codexJSON(opts: {
   const client = await CodexAppServerClient.start();
   try {
     const model = modelForProvider(opts.model);
-    if (!model)
-      throw new Error("Enter a Codex model in Local Reader settings.");
+    if (!model) throw new Error("Enter a Codex model in SkimRead settings.");
     const thread = await client.request("thread/start", {
       model,
       ephemeral: true,
@@ -512,7 +706,7 @@ async function codexJSON(opts: {
     const content = await waitForCodexTurn(client, turnID);
     if (!content)
       throw new Error("Codex App Server returned no message content.");
-    return JSON.parse(content) as unknown;
+    return parseLooseJSON(content);
   } finally {
     client.close();
   }
@@ -586,6 +780,18 @@ export async function checkStatus(): Promise<OllamaStatus> {
           client.close();
         }
       }
+      case "claude-code": {
+        cloudHeaders();
+        // Confirms the CLI is installed and runnable. Login is verified on the
+        // first real request; --version does not consume plan usage.
+        const version = await claudeVersion();
+        const configured = modelForProvider(String(getPref("skimModel")));
+        return {
+          ok: true,
+          version: `Claude Code (${version})`,
+          models: configured ? [configured] : [],
+        };
+      }
       default: {
         const [version, tags] = (await Promise.all([
           request("GET", "/api/version", undefined, { timeout: 5000 }),
@@ -594,7 +800,9 @@ export async function checkStatus(): Promise<OllamaStatus> {
         return {
           ok: true,
           version:
-            typeof version.version === "string" ? version.version : undefined,
+            typeof version.version === "string"
+              ? `Ollama ${version.version}`
+              : "Ollama",
           models: (tags.models || [])
             .map((model) => model.name)
             .filter((name): name is string => typeof name === "string"),
@@ -634,6 +842,8 @@ export async function chatJSON(opts: {
   switch (apiType()) {
     case "codex-app-server":
       return codexJSON(opts);
+    case "claude-code":
+      return claudeCodeJSON(opts);
     case "openai-api": {
       const response = await request("POST", "/responses", {
         model: opts.model,
@@ -708,7 +918,7 @@ export async function chatJSON(opts: {
 
   if (!content)
     throw new Error(`${providerLabel()} returned no message content`);
-  return JSON.parse(content) as unknown;
+  return parseLooseJSON(content);
 }
 
 /** Models required by current settings that are missing on the server. */

@@ -2,7 +2,7 @@
  * Versioned prompts for skim classification with dynamic label sets.
  * Bump PROMPT_VERSION whenever any prompt text changes (invalidates cache).
  */
-export const PROMPT_VERSION = 4;
+export const PROMPT_VERSION = 8;
 
 export interface LabelDef {
   key: string; // stable slug, e.g. "theory"
@@ -79,12 +79,23 @@ export function buildDocumentSelectionPrompt(
     text: string;
   }[],
   maxPerPage: number,
+  labels: LabelDef[] = DEFAULT_LABELS,
 ): string {
+  const pageCount = new Set(sentences.map((sentence) => sentence.pageIndex))
+    .size;
+  const minTotal = Math.max(6, pageCount);
+  const maxTotal = pageCount * 3;
+  const keys = labels.map((label) => label.key).join(" | ");
   return [
     "Choose the sentences worth highlighting while skimming this entire document.",
+    `Select between ${minTotal} and ${maxTotal} sentences in total for these ${pageCount} pages — aim for roughly 2 per page.`,
+    "Cover every major section; do not leave long stretches of the document without a highlight.",
     `Return at most ${maxPerPage} selected sentences per page.`,
     "Use the numeric id exactly as supplied. Do not return a sentence more than once.",
     "Use each sentence's section to judge its role in the paper, not merely its wording.",
+    "",
+    "Return ONLY this JSON, no prose or code fences:",
+    `{"selected":[{"id":<integer>,"label":"<one of: ${keys}>","importance":<0..1>}]}`,
     "",
     ...sentences.map(
       (sentence) =>
@@ -141,6 +152,42 @@ export function buildDocumentSelectionSchema(labels: LabelDef[]) {
   };
 }
 
+// ---------- TL;DR summary ----------
+
+export const TLDR_SYSTEM = `You write a faithful TL;DR of a scholarly document for a researcher skimming it.
+Rules:
+- 2 to 4 sentences, plain and specific.
+- State what the work does, how, and its main finding or contribution.
+- Use only the provided text. Never invent numbers, datasets, or claims.
+- No preamble ("This paper..."), no markdown, no citations. Return JSON only.`;
+
+export function buildTldrPrompt(title: string, text: string): string {
+  return [
+    title ? `Title: ${title}` : "",
+    "",
+    "Document text (may be truncated):",
+    text,
+  ]
+    .join("\n")
+    .trim();
+}
+
+export const TLDR_SCHEMA = {
+  type: "object",
+  properties: { tldr: { type: "string" } },
+  required: ["tldr"],
+  additionalProperties: false,
+};
+
+/** Extract and lightly clean the TL;DR string. Returns null if unusable. */
+export function validateTldr(raw: unknown): string | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const value = (raw as { tldr?: unknown }).tldr;
+  if (typeof value !== "string") return null;
+  const text = value.replace(/\s+/g, " ").trim();
+  return text.length >= 20 ? text : null;
+}
+
 export interface SkimResult {
   id: number;
   label: string;
@@ -191,39 +238,64 @@ export function validateDocumentSelection(
   sentenceCount: number,
 ): DocumentSelection[] | null {
   if (typeof raw !== "object" || raw === null) return null;
-  const selected = (raw as { selected?: unknown }).selected;
-  if (!Array.isArray(selected)) return null;
-  const allowed = new Set(labels.map((label) => label.key));
+  const root = raw as { selected?: unknown; sentences?: unknown };
+  // Accept the documented `selected` key, or a bare array / `sentences` alias
+  // some models emit instead.
+  const selected = Array.isArray(root.selected)
+    ? root.selected
+    : Array.isArray(root.sentences)
+      ? root.sentences
+      : Array.isArray(raw)
+        ? (raw as unknown[])
+        : null;
+  if (!selected) return null;
+
+  // Match label keys case-insensitively, and also accept a label's display
+  // name (e.g. "Goal" for key "goal").
+  const byKey = new Map<string, string>();
+  for (const label of labels) {
+    byKey.set(label.key.toLowerCase(), label.key);
+    byKey.set(label.name.toLowerCase(), label.key);
+  }
+
+  const toNumber = (value: unknown): number | null => {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string" && value.trim() !== "") {
+      const n = Number(value);
+      if (Number.isFinite(n)) return n;
+    }
+    return null;
+  };
+
   const seen = new Set<number>();
   const out: DocumentSelection[] = [];
   for (const entry of selected) {
-    const value = entry as {
-      id?: unknown;
-      label?: unknown;
-      importance?: unknown;
-    };
-    if (
-      typeof value !== "object" ||
-      value === null ||
-      typeof value.id !== "number" ||
-      !Number.isInteger(value.id) ||
-      value.id < 0 ||
-      value.id >= sentenceCount ||
-      seen.has(value.id) ||
-      typeof value.label !== "string" ||
-      !allowed.has(value.label) ||
-      typeof value.importance !== "number"
-    ) {
-      return null;
-    }
-    seen.add(value.id);
-    out.push({
-      id: value.id,
-      label: value.label,
-      importance: Math.max(0, Math.min(1, value.importance)),
-    });
+    if (typeof entry !== "object" || entry === null) continue;
+    const value = entry as Record<string, unknown>;
+    const idNum = toNumber(value.id);
+    if (idNum === null) continue;
+    const id = Math.trunc(idNum);
+    if (id < 0 || id >= sentenceCount || seen.has(id)) continue;
+    const labelRaw =
+      typeof value.label === "string"
+        ? value.label
+        : typeof value.category === "string"
+          ? value.category
+          : "";
+    const label = byKey.get(labelRaw.trim().toLowerCase());
+    if (!label) continue;
+    // Accept importance / confidence / score / weight; default when absent.
+    const imp =
+      toNumber(value.importance) ??
+      toNumber(value.confidence) ??
+      toNumber(value.score) ??
+      toNumber(value.weight) ??
+      0.7;
+    seen.add(id);
+    out.push({ id, label, importance: Math.max(0, Math.min(1, imp)) });
   }
-  return out;
+  // Only a completely unusable response fails (triggering the repair retry).
+  return out.length ? out : null;
 }
 
 // ---------- zero-shot label discovery ----------

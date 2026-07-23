@@ -1,5 +1,5 @@
 /**
- * Explicit conversion of Local Reader overlays to normal Zotero highlights.
+ * Explicit conversion of SkimRead overlays to normal Zotero highlights.
  * Nothing is written until the reader presses the dedicated save button.
  */
 import {

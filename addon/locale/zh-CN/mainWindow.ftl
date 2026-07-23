@@ -1,1 +1,1 @@
-localreader-placeholder = Local Reader
+skimread-placeholder = SkimRead

@@ -2,7 +2,7 @@
  * The ONLY module that touches Zotero reader / pdf.js internals
  * (verified live against Zotero 9.0.6, pdf.js 5.4.0, Zotero pdf-reader fork).
  *
- * Highlights are ephemeral DOM overlay divs (class .localreader-hl) appended
+ * Highlights are ephemeral DOM overlay divs (class .skimread-hl) appended
  * to pdf.js page containers. They are NEVER Zotero annotations and never
  * touch the library or the PDF file. clearOverlays() removes every trace.
  */
@@ -40,7 +40,7 @@ interface ReaderHandle {
   app: any; // PDFViewerApplication
 }
 
-const HL_CLASS = "localreader-hl";
+const HL_CLASS = "skimread-hl";
 const Cu = Components.utils;
 
 /** Resolve the reader shown in the given main-window tab. */
@@ -82,15 +82,48 @@ export async function extractPage(
   if (!rawChars || !rawChars.length) {
     return { pageIndex, text: "", charMap: [], chars: [] };
   }
+
+  // Page furniture (running headers, footers, page numbers, footnotes) sits in
+  // the top/bottom margins and, for footnotes, in a smaller font near the
+  // bottom. Dropping it here keeps it out of every sentence and highlight box.
+  const vb = pd.viewBox;
+  const pageHeight =
+    Array.isArray(vb) && vb.length >= 4 ? Number(vb[3]) - Number(vb[1]) : 0;
+  const yMid = (rc: { rect: number[] }) => (rc.rect[1] + rc.rect[3]) / 2;
+
+  // Body-text font size (median of non-rotated chars) to spot small footnotes.
+  const sizes: number[] = [];
+  for (const rc of rawChars) {
+    if (!rc.rotation && !rc.diagonal) sizes.push(rc.fontSize ?? 10);
+  }
+  sizes.sort((a, b) => a - b);
+  const medianSize = sizes.length ? sizes[Math.floor(sizes.length / 2)] : 10;
+
   const chars: PageChar[] = [];
   for (let i = 0; i < rawChars.length; i++) {
     const rc = rawChars[i];
+    // Skip rotated/diagonal text (arXiv watermarks, stamps, vertical journal
+    // banners). Mixing it into reading order corrupts both sentences and the
+    // merged highlight rectangles.
+    if (rc.rotation || rc.diagonal) continue;
+    if (pageHeight > 0) {
+      const y = yMid(rc);
+      // Top/bottom 5.5% margins → headers, footers, page numbers.
+      if (y > pageHeight * 0.945 || y < pageHeight * 0.055) continue;
+      // Small font in the bottom 18% → footnotes.
+      if (y < pageHeight * 0.18 && (rc.fontSize ?? 10) < medianSize * 0.82) {
+        continue;
+      }
+    }
     chars.push({
       c: String(rc.u ?? rc.c ?? ""),
       rect: [rc.rect[0], rc.rect[1], rc.rect[2], rc.rect[3]],
       baseline: rc.baseline ?? rc.rect[1],
       fontSize: rc.fontSize ?? 10,
     });
+  }
+  if (!chars.length) {
+    return { pageIndex, text: "", charMap: [], chars: [] };
   }
   let text = "";
   const charMap: number[] = [];
@@ -139,7 +172,13 @@ function rangeToLineRects(
     }
   }
   if (cur) rects.push(cur);
-  return rects;
+  // Geometry sanity net: a merged "line" can never be taller than a couple of
+  // text lines. Anything bigger means stray geometry (rotated stamps, layout
+  // artifacts) slipped in — dropping it is always better than a page-sized box.
+  const maxHeight =
+    Math.max(...page.chars.slice(startChar, endChar).map((c) => c.fontSize)) *
+      2.5 || 40;
+  return rects.filter((rect) => rect[3] - rect[1] <= maxHeight);
 }
 
 /** Convert a range to Zotero's native PDF annotation position format. */
@@ -177,9 +216,9 @@ export async function installOverlays(
   }
 
   const doc = h.win.document;
-  if (!doc.getElementById("localreader-style")) {
+  if (!doc.getElementById("skimread-style")) {
     const style = doc.createElement("style");
-    style.id = "localreader-style";
+    style.id = "skimread-style";
     style.textContent =
       `.${HL_CLASS}{position:absolute;pointer-events:none;border-radius:2px;mix-blend-mode:multiply;z-index:3;}` +
       `.${HL_CLASS}-flag{position:absolute;pointer-events:none;z-index:4;font:600 9px sans-serif;` +
@@ -246,7 +285,7 @@ export async function installOverlays(
       try {
         await paintPage(pageIndex);
       } catch (e) {
-        ztoolkit.log("localreader paint error", pageIndex, e);
+        ztoolkit.log("skimread paint error", pageIndex, e);
       }
     }
   }
