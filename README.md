@@ -154,11 +154,31 @@ release.
 
 ```bash
 npm install
-npm run build
-npm test
+npm run build     # → .scaffold/build/skim-read.xpi
 ```
 
-The production plugin is built at `.scaffold/build/skim-read.xpi`.
+The tests run inside Zotero. Copy `.env.example` to `.env` and set
+`ZOTERO_PLUGIN_ZOTERO_BIN_PATH` to your Zotero binary, then:
+
+```bash
+npm test          # launches Zotero and runs the test suite
+```
+
+## Acknowledgements
+
+SkimRead is an independent project (no code reused from the works below), built
+on and inspired by:
+
+- [zotero-plugin-template](https://github.com/windingwind/zotero-plugin-template)
+  by windingwind — the scaffold and build workflow SkimRead is based on.
+- [Semantic Reader](https://www.semanticscholar.org/product/semantic-reader) and
+  the [Scim](https://cacm.acm.org/research/the-semantic-reader-project/) project
+  by the Allen Institute for AI — the skimming-highlight experience and the
+  Goal / Method / Result / Novelty scheme are modeled on their research.
+- [llm-for-zotero](https://github.com/yilewang/llm-for-zotero) by Yile Wang —
+  SkimRead is designed to run alongside it without overlapping its features, and
+  its local-CLI provider integrations (Codex App Server, Claude Code) were a
+  reference point for SkimRead's own subscription-login providers.
 
 ## License
 
