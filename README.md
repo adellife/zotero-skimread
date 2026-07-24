@@ -1,20 +1,26 @@
 # SkimRead for Zotero
 
-SkimRead adds document-wide AI skimming highlights to Zotero’s PDF reader.
-It reads the paper as a whole, selects the sentences that best convey its
-goal, method, results, and novelty, and shows them as coloured overlays in the
-reader.
+SkimRead adds document-wide AI skimming highlights to Zotero’s reader, for
+both **PDFs and EPUBs**. It reads the document as a whole, selects the
+sentences that best convey its goal, method, results, and novelty, and shows
+them as coloured overlays in the reader.
 
 It is designed to work independently of other Zotero AI plugins.
 
 ## What it does
 
-- Selects highlights in relation to the complete paper, not sentence by sentence.
+- Selects highlights in relation to the complete document, not sentence by sentence.
+- Works with **PDFs and EPUBs**. EPUB chapters are highlighted in place using
+  the browser’s CSS Custom Highlight API, which colours the text without
+  inserting anything into the book, and a clickable list of the selected
+  passages is shown in the sidebar for navigation.
 - Uses the paper’s structure: references are excluded and section roles help
   guide selection.
 - Handles long documents and books: when a document exceeds the provider’s
   context window, it is processed in context-sized parts that follow chapter
-  and section boundaries, with progress shown and resumable runs. Papers that
+  and section boundaries. A run can be **paused and resumed** at any point —
+  highlights found so far stay on screen, and resuming skips re-reading the
+  document. Papers that
   fit in one window are still selected in a single pass. Providers with very
   large context windows (1M+ tokens) can be used by raising the context
   setting, which reduces the number of parts.
@@ -44,17 +50,24 @@ It is designed to work independently of other Zotero AI plugins.
 
 ## Using it
 
-Open a PDF, open the **SkimRead** section in the reader’s right sidebar, and
-press **Generate**. A status line reports progress and, when finished, shows a
-summary such as `✓ Complete — 24 highlights from 812 sentences`. The
-**Generate** button becomes **Reset & regenerate** once a run is cached, or
-**Resume** if a run was interrupted.
+Open a PDF or EPUB, open the **SkimRead** section in the reader’s right
+sidebar, and press **Generate**. A status line reports progress and, when
+finished, shows a summary such as `✓ Complete — 24 highlights from 812
+sentences`. The **Generate** button becomes **Reset & regenerate** once a run
+is cached.
 
+- **Pause / Resume / Cancel run** — long books can be stopped at any time.
+  **Pause** keeps the highlights found so far on screen and saves progress;
+  the button then becomes **Resume**, which continues without re-reading the
+  document or re-spending tokens on work already done. **Cancel run** (the
+  third button, while a run is live or paused) abandons the run and discards
+  its progress. **Clear** simply removes the overlays of a finished run.
 - **Label mode** — _Default_ uses Goal / Method / Result / Novelty (the
   Semantic Reader scheme). _Custom_ lets you define your own labels in Settings
-  (for example a _Theory_ label). _Auto-discover_ asks the model to read a
-  sample of the document and propose 3–6 labels that fit it, which is useful
-  for books and chapters where the default scheme does not apply.
+  (for example a _Theory_ label). _Auto-discover_ adapts to the document type:
+  for an article it proposes a single set of labels up front, while for EPUBs,
+  books, theses and reports (detected from the Zotero **Item Type**) labels
+  evolve chapter by chapter, since topics shift across a book.
 - **Density / opacity / margin flags** — adjust how many highlights appear per
   page, how strong the colour is, and whether the label chips show in the
   margin. These re-apply instantly from cache without contacting the model.
@@ -146,9 +159,13 @@ prompts, and provider transcripts are not logged or cached by the plugin.
 
 ## Status
 
-Version 0.1.0 provides document-wide skimming highlights, TL;DR summaries, and
-native Zotero annotation export. Inline citation cards are planned for a later
-release.
+Version 0.2.0 adds EPUB support, pause/resume for long runs, and
+document-type-aware label discovery, alongside the existing document-wide
+skimming highlights, TL;DR summaries, and native Zotero annotation export.
+Inline citation cards are planned for a later release.
+
+Known limitations: EPUB highlights are not yet exportable as native Zotero
+annotations (PDFs are), and scanned PDFs need OCR first.
 
 ## Develop
 
@@ -166,8 +183,8 @@ npm test          # launches Zotero and runs the test suite
 
 ## Acknowledgements
 
-SkimRead is an independent project (no code reused from the works below), built
-on and inspired by:
+SkimRead is an independent project, built on and inspired by the works below.
+Except where a source file states otherwise, no code is reused from them:
 
 - [zotero-plugin-template](https://github.com/windingwind/zotero-plugin-template)
   by windingwind — the scaffold and build workflow SkimRead is based on.
@@ -179,6 +196,11 @@ on and inspired by:
   SkimRead is designed to run alongside it without overlapping its features, and
   its local-CLI provider integrations (Codex App Server, Claude Code) were a
   reference point for SkimRead's own subscription-login providers.
+- [Nodus](https://github.com/Drakonis96/nodus) by Drakonis96 (MIT) — its
+  Zotero auto-highlighter demonstrated a robust way to match model-quoted text
+  back to the document. SkimRead's quote normalisation (NFKC, ligatures, quote
+  and dash variants) and shrinking-prefix fallback are adapted from it; the
+  relevant function in `src/reader/adapter.ts` carries the attribution.
 
 ## License
 

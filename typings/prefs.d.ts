@@ -9,18 +9,15 @@ declare namespace _ZoteroTypes {
     PluginPrefsMap: {
       "ollamaUrl": string;
       "apiType": string;
-      "openaiApiKey": string;
       "openaiCompatibleKey": string;
-      "anthropicApiKey": string;
       "codexPath": string;
       "codexModel": string;
       "codexReasoning": string;
       "claudeModel": string;
       "claudePath": string;
       "cloudConsent": boolean;
-      "cloudContextTokens": number;
-      "maxOutputTokens": number;
-      "numCtx": number;
+      "contextTokens": number;
+      "ollamaNumCtx": number;
       "skimModel": string;
       "tldrModel": string;
       "tldrWithSkim": boolean;

@@ -1,7 +1,7 @@
 {
   "name": "zotero-skimread",
   "type": "module",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Semantic Reader-style global skimming highlights for Zotero, private by default with optional structured cloud providers",
   "config": {
     "addonName": "SkimRead",
@@ -30,6 +30,7 @@
     "update-deps": "npm update --save"
   },
   "dependencies": {
+    "jszip": "^3.10.1",
     "zotero-plugin-toolkit": "^5.1.0-beta.13"
   },
   "devDependencies": {

@@ -11,15 +11,12 @@
       for="zotero-prefpane-__addonRef__-apiType"
       data-l10n-id="pref-provider"
     ></html:label>
-    <menulist id="zotero-prefpane-__addonRef__-apiType" style="width: 340px">
+    <menulist id="zotero-prefpane-__addonRef__-apiType" style="width: 360px">
       <menupopup>
-        <menuitem label="Ollama — local" value="ollama" />
         <menuitem
-          label="OpenAI-compatible server — local or remote (vLLM, LM Studio, OpenRouter)"
+          label="OpenAI-compatible — local or cloud (Ollama, vLLM, LM Studio, OpenAI, Anthropic, OpenRouter, Gemini)"
           value="openai-compatible"
         />
-        <menuitem label="OpenAI API — cloud" value="openai-api" />
-        <menuitem label="Anthropic API — cloud" value="anthropic" />
         <menuitem
           label="Codex App Server — ChatGPT login"
           value="codex-app-server"
@@ -36,10 +33,9 @@
     id="zotero-prefpane-__addonRef__-consent-row"
     style="display: none; gap: 6px"
   >
-    <description style="max-width: 520px; color: #9a3412">
-      This sends extracted PDF text off your computer to the selected provider
-      (a remote endpoint for OpenAI-compatible). SkimRead never falls back to a
-      remote provider automatically.
+    <description style="max-width: 540px; color: #9a3412">
+      This sends extracted PDF text off your computer to the selected endpoint.
+      SkimRead never sends anything to a remote provider automatically.
     </description>
     <checkbox
       id="zotero-prefpane-__addonRef__-cloudConsent"
@@ -52,28 +48,6 @@
     id="zotero-prefpane-__addonRef__-cloud-settings"
     style="display: none; gap: 8px"
   >
-    <hbox id="zotero-prefpane-__addonRef__-openai-key-row" align="center">
-      <html:label for="zotero-prefpane-__addonRef__-openaiApiKey"
-        >OpenAI API key</html:label
-      >
-      <html:input
-        type="password"
-        id="zotero-prefpane-__addonRef__-openaiApiKey"
-        preference="openaiApiKey"
-        style="width: 260px"
-      />
-    </hbox>
-    <hbox id="zotero-prefpane-__addonRef__-anthropic-key-row" align="center">
-      <html:label for="zotero-prefpane-__addonRef__-anthropicApiKey"
-        >Anthropic API key</html:label
-      >
-      <html:input
-        type="password"
-        id="zotero-prefpane-__addonRef__-anthropicApiKey"
-        preference="anthropicApiKey"
-        style="width: 260px"
-      />
-    </hbox>
     <vbox id="zotero-prefpane-__addonRef__-codex-settings" style="gap: 8px">
       <description style="max-width: 520px">
         Uses your local Codex CLI session. Run
@@ -152,37 +126,6 @@
         Model can be an alias like sonnet or opus, or a full model ID.
       </description>
     </vbox>
-    <hbox align="center">
-      <html:label for="zotero-prefpane-__addonRef__-cloudContextTokens"
-        >Cloud context budget (tokens)</html:label
-      >
-      <html:input
-        type="number"
-        id="zotero-prefpane-__addonRef__-cloudContextTokens"
-        preference="cloudContextTokens"
-        min="16000"
-        step="1000"
-        style="width: 110px"
-      />
-    </hbox>
-    <hbox align="center">
-      <html:label for="zotero-prefpane-__addonRef__-maxOutputTokens"
-        >Maximum structured output tokens</html:label
-      >
-      <html:input
-        type="number"
-        id="zotero-prefpane-__addonRef__-maxOutputTokens"
-        preference="maxOutputTokens"
-        min="1024"
-        step="1024"
-        style="width: 110px"
-      />
-    </hbox>
-    <description style="max-width: 520px; font-size: 12px; opacity: 0.8">
-      OpenAI examples: gpt-5.6-luna for fast skimming or gpt-5.6-terra for
-      higher-quality selection. For Anthropic, enter a Claude model ID available
-      to your account.
-    </description>
   </vbox>
 
   <hbox id="zotero-prefpane-__addonRef__-url-row" align="center">
@@ -209,6 +152,8 @@
       style="width: 260px"
     ></html:input>
   </hbox>
+  <html:datalist id="zotero-prefpane-__addonRef__-model-list"></html:datalist>
+
   <hbox id="zotero-prefpane-__addonRef__-skim-model-row" align="center">
     <html:label
       for="zotero-prefpane-__addonRef__-skimModel"
@@ -218,7 +163,13 @@
       type="text"
       id="zotero-prefpane-__addonRef__-skimModel"
       preference="skimModel"
+      list="zotero-prefpane-__addonRef__-model-list"
+      style="width: 220px"
     ></html:input>
+    <button
+      id="zotero-prefpane-__addonRef__-refresh-models"
+      data-l10n-id="pref-refresh-models"
+    />
   </hbox>
 
   <hbox id="zotero-prefpane-__addonRef__-tldr-model-row" align="center">
@@ -230,21 +181,38 @@
       type="text"
       id="zotero-prefpane-__addonRef__-tldrModel"
       preference="tldrModel"
+      list="zotero-prefpane-__addonRef__-model-list"
+      style="width: 220px"
     ></html:input>
   </hbox>
 
   <hbox id="zotero-prefpane-__addonRef__-num-ctx-row" align="center">
     <html:label
-      for="zotero-prefpane-__addonRef__-numCtx"
+      for="zotero-prefpane-__addonRef__-contextTokens"
       data-l10n-id="pref-num-ctx"
     ></html:label>
     <html:input
       type="number"
-      id="zotero-prefpane-__addonRef__-numCtx"
-      preference="numCtx"
+      id="zotero-prefpane-__addonRef__-contextTokens"
+      preference="contextTokens"
       min="2048"
       step="1024"
-      style="width: 90px"
+      style="width: 110px"
+    ></html:input>
+  </hbox>
+
+  <hbox id="zotero-prefpane-__addonRef__-ollama-ctx-row" align="center">
+    <html:label
+      for="zotero-prefpane-__addonRef__-ollamaNumCtx"
+      data-l10n-id="pref-ollama-num-ctx"
+    ></html:label>
+    <html:input
+      type="number"
+      id="zotero-prefpane-__addonRef__-ollamaNumCtx"
+      preference="ollamaNumCtx"
+      min="0"
+      step="1024"
+      style="width: 110px"
     ></html:input>
   </hbox>
 

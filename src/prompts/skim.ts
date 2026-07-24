@@ -2,7 +2,7 @@
  * Versioned prompts for skim classification with dynamic label sets.
  * Bump PROMPT_VERSION whenever any prompt text changes (invalidates cache).
  */
-export const PROMPT_VERSION = 11;
+export const PROMPT_VERSION = 13;
 
 export interface LabelDef {
   key: string; // stable slug, e.g. "theory"
@@ -158,6 +158,96 @@ export function buildBandSelectionPrompt(
         `${sentence.id} | page ${sentence.pageIndex + 1} | section ${sentence.section} | ${sentence.text}`,
     ),
   ].join("\n");
+}
+
+// ---------- adaptive (evolving) label selection ----------
+
+export const ADAPTIVE_SYSTEM = `You select and label the most useful sentences from a scholarly document to support skimming.
+You maintain a small, consistent set of role labels (aim for 3-6, never more than 8). Reuse existing labels wherever possible; add a new short label only when a sentence's role genuinely fits none of them, and never invent near-duplicates of an existing label. Return JSON only.`;
+
+export function buildAdaptiveSelectionPrompt(
+  sentences: { id: number; text: string }[],
+  targetCount: number,
+  labels: LabelDef[],
+): string {
+  const existing = labels.length
+    ? labels.map((l) => `- ${l.key}: ${l.description || l.name}`).join("\n")
+    : "(none defined yet — you decide the first labels for this document)";
+  return [
+    `This is ONE passage from a larger document. Select the ${targetCount} most useful sentences to highlight for skimming (at most ${targetCount + 1}), spread across the passage.`,
+    "Label each selected sentence with its role. Prefer these existing labels:",
+    existing,
+    "If a sentence truly fits none, create a short new lowercase label (one or two words). Reuse labels consistently across the document.",
+    'Return ONLY this JSON, no prose: {"selected":[{"id":<integer>,"label":"<label>","importance":<0..1>}]}',
+    "",
+    ...sentences.map((s) => `${s.id} | ${s.text}`),
+  ].join("\n");
+}
+
+export const ADAPTIVE_SCHEMA = {
+  type: "object",
+  properties: {
+    selected: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          id: { type: "integer" },
+          label: { type: "string" },
+          importance: { type: "number" },
+        },
+        required: ["id", "label", "importance"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["selected"],
+  additionalProperties: false,
+};
+
+export interface AdaptiveResult {
+  id: number;
+  label: string;
+  importance: number;
+}
+
+/** Validate adaptive output: any non-empty label is allowed (reconciled later). */
+export function validateAdaptiveSelection(
+  raw: unknown,
+  sentenceCount: number,
+): AdaptiveResult[] | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const arr = (raw as { selected?: unknown }).selected;
+  if (!Array.isArray(arr)) return null;
+  const seen = new Set<number>();
+  const out: AdaptiveResult[] = [];
+  const toNum = (v: unknown): number | null => {
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    if (typeof v === "string" && v.trim() && Number.isFinite(Number(v))) {
+      return Number(v);
+    }
+    return null;
+  };
+  for (const entry of arr) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const e = entry as Record<string, unknown>;
+    const idN = toNum(e.id);
+    if (idN === null) continue;
+    const id = Math.trunc(idN);
+    if (id < 0 || id >= sentenceCount || seen.has(id)) continue;
+    const label = typeof e.label === "string" ? e.label.trim() : "";
+    if (!label) continue;
+    seen.add(id);
+    out.push({
+      id,
+      label,
+      importance: Math.max(
+        0,
+        Math.min(1, toNum(e.importance) ?? toNum(e.confidence) ?? 0.7),
+      ),
+    });
+  }
+  return out.length ? out : null;
 }
 
 export function buildDocumentSelectionSchema(labels: LabelDef[]) {

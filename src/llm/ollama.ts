@@ -14,50 +14,33 @@ export interface OllamaStatus {
   error?: string;
 }
 
-type ApiType =
-  | "ollama"
-  | "openai-compatible"
-  | "openai-api"
-  | "anthropic"
-  | "codex-app-server"
-  | "claude-code";
+// One HTTP transport (OpenAI-compatible /v1/chat/completions) for every local
+// or cloud endpoint, plus two subscription-login CLIs run as subprocesses.
+type ApiType = "openai-compatible" | "codex-app-server" | "claude-code";
 
 interface RequestOptions {
   headers?: Record<string, string>;
   timeout?: number;
+  /** Use the server root (no /v1) — for Ollama's native /api endpoints. */
+  native?: boolean;
 }
 
 function apiType(): ApiType {
-  const value = String(getPref("apiType") || "ollama");
-  // `openai` was the pre-0.6 name for a localhost-compatible server.
-  if (value === "openai" || value === "openai-compatible") {
-    return "openai-compatible";
-  }
-  if (
-    value === "openai-api" ||
-    value === "anthropic" ||
-    value === "codex-app-server" ||
-    value === "claude-code"
-  ) {
-    return value;
-  }
-  return "ollama";
+  const value = String(getPref("apiType") || "openai-compatible");
+  if (value === "codex-app-server" || value === "claude-code") return value;
+  // Legacy provider names (ollama / openai / openai-api / anthropic) all use
+  // the OpenAI-compatible transport now.
+  return "openai-compatible";
 }
 
 export function providerLabel(): string {
   switch (apiType()) {
-    case "openai-compatible":
-      return "OpenAI-compatible local server";
-    case "openai-api":
-      return "OpenAI API";
-    case "anthropic":
-      return "Anthropic API";
     case "codex-app-server":
       return "Codex App Server";
     case "claude-code":
       return "Claude Code";
     default:
-      return "Ollama";
+      return "OpenAI-compatible";
   }
 }
 
@@ -66,65 +49,36 @@ function isSubprocessProvider(): boolean {
   return apiType() === "codex-app-server" || apiType() === "claude-code";
 }
 
-function isCloudProvider(): boolean {
-  return (
-    apiType() === "openai-api" ||
-    apiType() === "anthropic" ||
-    apiType() === "codex-app-server" ||
-    apiType() === "claude-code"
+/**
+ * Endpoint base URL. `native` returns the server root (for Ollama's /api/*),
+ * otherwise the OpenAI-compatible /v1 base (adding /v1, tolerating a stray one).
+ */
+function baseUrl(native = false): string {
+  const url = String(getPref("ollamaUrl") || "http://localhost:11434").replace(
+    /\/+$/,
+    "",
   );
+  const root = url.replace(/\/v1$/, "");
+  return native ? root : /\/v1$/.test(url) ? url : `${root}/v1`;
 }
 
-function baseUrl(): string {
-  switch (apiType()) {
-    case "openai-api":
-      return "https://api.openai.com/v1";
-    case "anthropic":
-      return "https://api.anthropic.com/v1";
-    case "openai-compatible": {
-      let url = String(
-        getPref("ollamaUrl") || "http://localhost:11434",
-      ).replace(/\/+$/, "");
-      if (!/\/v1$/.test(url)) url += "/v1";
-      return url;
-    }
-    default:
-      return String(getPref("ollamaUrl") || "http://localhost:11434").replace(
-        /\/+$/,
-        "",
-      );
-  }
+/** Ollama context length to request via the native API; 0 = server default. */
+function ollamaNumCtx(): number {
+  return Math.max(0, Math.floor(Number(getPref("ollamaNumCtx")) || 0));
 }
 
-function assertLocalhost(url: string) {
+function isLocalHost(url: string): boolean {
   const host = url.replace(/^https?:\/\//, "").split(/[/:]/)[0];
-  if (!["localhost", "127.0.0.1", "[::1]", "::1"].includes(host)) {
-    throw new Error(
-      `Refusing non-local LLM endpoint: ${host}. Use a local server, or choose an explicit cloud provider.`,
-    );
-  }
+  return ["localhost", "127.0.0.1", "[::1]", "::1"].includes(host);
 }
 
-function cloudHeaders(): Record<string, string> {
+/** Consent gate for anything that sends text off this computer. */
+function requireConsent(): void {
   if (!getPref("cloudConsent")) {
     throw new Error(
-      "Cloud inference is disabled. Confirm that extracted PDF text may leave this computer in SkimRead settings.",
+      "This endpoint sends text off your computer. Enable the cloud-consent checkbox in SkimRead settings first.",
     );
   }
-  if (apiType() === "openai-api") {
-    const key = String(getPref("openaiApiKey") || "").trim();
-    if (!key) throw new Error("Enter an OpenAI API key in SkimRead settings.");
-    return { Authorization: `Bearer ${key}` };
-  }
-  // Subprocess providers (Codex, Claude Code) authenticate via their own CLI
-  // login, so there is no API key to attach — only consent is required.
-  if (isSubprocessProvider()) return {};
-  const key = String(getPref("anthropicApiKey") || "").trim();
-  if (!key) throw new Error("Enter an Anthropic API key in SkimRead settings.");
-  return {
-    "x-api-key": key,
-    "anthropic-version": "2023-06-01",
-  };
 }
 
 async function request(
@@ -133,29 +87,17 @@ async function request(
   body?: object,
   options: RequestOptions = {},
 ): Promise<unknown> {
-  const url = `${baseUrl()}${path}`;
+  const url = `${baseUrl(options.native)}${path}`;
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(options.headers || {}),
   };
-  if (apiType() === "openai-compatible") {
-    // Local server (Ollama-style) needs no key or consent. A remote
-    // OpenAI-compatible endpoint (OpenRouter, hosted vLLM) may need a key and
-    // does send text off-machine, so it requires explicit cloud consent.
-    const host = url.replace(/^https?:\/\//, "").split(/[/:]/)[0];
-    const local = ["localhost", "127.0.0.1", "[::1]", "::1"].includes(host);
-    if (!local && !getPref("cloudConsent")) {
-      throw new Error(
-        "This is a remote endpoint. Enable the cloud-consent checkbox in SkimRead settings to allow sending text off your computer.",
-      );
-    }
-    const key = String(getPref("openaiCompatibleKey") || "").trim();
-    if (key) headers.Authorization = `Bearer ${key}`;
-  } else if (isCloudProvider()) {
-    Object.assign(headers, cloudHeaders());
-  } else {
-    assertLocalhost(url);
-  }
+  // Localhost needs no key or consent. A remote endpoint (OpenRouter, hosted
+  // vLLM, OpenAI, Anthropic, Gemini) sends text off-machine, so it requires an
+  // API key and explicit cloud consent.
+  if (!isLocalHost(url)) requireConsent();
+  const key = String(getPref("openaiCompatibleKey") || "").trim();
+  if (key) headers.Authorization = `Bearer ${key}`;
 
   const xhr = await Zotero.HTTP.request(method, url, {
     headers,
@@ -166,7 +108,7 @@ async function request(
   return JSON.parse(xhr.response) as unknown;
 }
 
-/** A Codex App Server run intentionally has one model for all reader tasks. */
+/** The subprocess providers use one model for all reader tasks. */
 export function modelForProvider(configuredModel: string): string {
   if (apiType() === "codex-app-server") {
     return String(getPref("codexModel") || "").trim();
@@ -221,26 +163,6 @@ export function parseLooseJSON(raw: string): unknown {
     }
   }
   throw new Error("Incomplete JSON in the model response");
-}
-
-function readOpenAIResponseText(response: unknown): string | null {
-  if (typeof response !== "object" || response === null) return null;
-  const obj = response as {
-    output_text?: unknown;
-    output?: unknown;
-  };
-  if (typeof obj.output_text === "string") return obj.output_text;
-  if (!Array.isArray(obj.output)) return null;
-  const parts: string[] = [];
-  for (const item of obj.output) {
-    const content = (item as { content?: unknown })?.content;
-    if (!Array.isArray(content)) continue;
-    for (const part of content) {
-      const text = (part as { text?: unknown })?.text;
-      if (typeof text === "string") parts.push(text);
-    }
-  }
-  return parts.length ? parts.join("") : null;
 }
 
 interface CodexPipe {
@@ -534,7 +456,7 @@ async function claudeCodeJSON(opts: {
   system: string;
   user: string;
 }): Promise<unknown> {
-  cloudHeaders(); // enforces explicit consent (returns {} for subprocess mode)
+  requireConsent();
   const model = modelForProvider(opts.model);
   if (!model) throw new Error("Enter a Claude model in SkimRead settings.");
   const Subprocess = await loadCodexSubprocess();
@@ -696,7 +618,7 @@ async function codexJSON(opts: {
   user: string;
   schema: object;
 }): Promise<unknown> {
-  cloudHeaders(); // enforces explicit consent without reading an API key
+  requireConsent();
   const client = await CodexAppServerClient.start();
   try {
     const model = modelForProvider(opts.model);
@@ -744,47 +666,12 @@ function codexModels(value: unknown): string[] {
   });
 }
 
-/** Check the configured provider without ever falling back to another one. */
+/** Check the configured provider (lists models where the endpoint allows). */
 export async function checkStatus(): Promise<OllamaStatus> {
   try {
     switch (apiType()) {
-      case "openai-compatible": {
-        const response = (await request("GET", "/models", undefined, {
-          timeout: 8000,
-        })) as { data?: { id?: unknown }[] };
-        return {
-          ok: true,
-          version: "OpenAI-compatible local server",
-          models: (response.data || [])
-            .map((model) => model.id)
-            .filter((id): id is string => typeof id === "string"),
-        };
-      }
-      case "openai-api": {
-        const response = (await request("GET", "/models", undefined, {
-          timeout: 15000,
-        })) as { data?: { id?: unknown }[] };
-        return {
-          ok: true,
-          version: "OpenAI API",
-          models: (response.data || [])
-            .map((model) => model.id)
-            .filter((id): id is string => typeof id === "string"),
-        };
-      }
-      case "anthropic":
-        // Anthropic has no equivalent public model-list endpoint. Do not make a
-        // billable test request merely to refresh the reader sidebar.
-        cloudHeaders();
-        return {
-          ok: true,
-          version: "Anthropic API (configured)",
-          models: modelForProvider(String(getPref("skimModel")))
-            ? [modelForProvider(String(getPref("skimModel")))]
-            : [],
-        };
       case "codex-app-server": {
-        cloudHeaders();
+        requireConsent();
         const client = await CodexAppServerClient.start();
         try {
           const models = codexModels(await client.request("model/list", {}));
@@ -799,7 +686,7 @@ export async function checkStatus(): Promise<OllamaStatus> {
         }
       }
       case "claude-code": {
-        cloudHeaders();
+        requireConsent();
         // Confirms the CLI is installed and runnable. Login is verified on the
         // first real request; --version does not consume plan usage.
         const version = await claudeVersion();
@@ -811,19 +698,17 @@ export async function checkStatus(): Promise<OllamaStatus> {
         };
       }
       default: {
-        const [version, tags] = (await Promise.all([
-          request("GET", "/api/version", undefined, { timeout: 5000 }),
-          request("GET", "/api/tags", undefined, { timeout: 5000 }),
-        ])) as [{ version?: unknown }, { models?: { name?: unknown }[] }];
+        // OpenAI-compatible /models works for Ollama, vLLM, OpenAI, OpenRouter,
+        // etc. Anthropic's compat endpoint also exposes it.
+        const response = (await request("GET", "/models", undefined, {
+          timeout: 12000,
+        })) as { data?: { id?: unknown }[] };
         return {
           ok: true,
-          version:
-            typeof version.version === "string"
-              ? `Ollama ${version.version}`
-              : "Ollama",
-          models: (tags.models || [])
-            .map((model) => model.name)
-            .filter((name): name is string => typeof name === "string"),
+          version: "OpenAI-compatible",
+          models: (response.data || [])
+            .map((model) => model.id)
+            .filter((id): id is string => typeof id === "string"),
         };
       }
     }
@@ -832,12 +717,9 @@ export async function checkStatus(): Promise<OllamaStatus> {
   }
 }
 
-/** Maximum total context, conservatively reserving room for instructions/output. */
+/** Selection/chunking token budget (user-configurable via one setting). */
 export function contextLimitTokens(): number {
-  if (isCloudProvider()) {
-    return Math.max(16000, Number(getPref("cloudContextTokens")) || 120000);
-  }
-  return Math.max(2048, Number(getPref("numCtx")) || 8192);
+  return Math.max(2048, Number(getPref("contextTokens")) || 8192);
 }
 
 // ---------- token usage accounting ----------
@@ -892,49 +774,36 @@ export async function chatJSON(opts: {
       return codexJSON(opts);
     case "claude-code":
       return claudeCodeJSON(opts);
-    case "openai-api": {
-      const response = (await request("POST", "/responses", {
-        model: opts.model,
-        // Paper text is sensitive. Do not ask OpenAI to retain this request.
-        store: false,
-        max_output_tokens: Math.max(
-          1024,
-          Number(getPref("maxOutputTokens")) || 16384,
-        ),
-        input: messages,
-        text: {
-          format: {
-            type: "json_schema",
-            name: "local_reader_output",
-            strict: true,
-            schema: opts.schema,
+    default: {
+      const numCtx = ollamaNumCtx();
+      if (numCtx > 0) {
+        // Native Ollama endpoint — the only way to set the context window.
+        // (The OpenAI-compatible endpoint silently ignores num_ctx.)
+        const response = (await request(
+          "POST",
+          "/api/chat",
+          {
+            model: opts.model,
+            stream: false,
+            format: opts.schema,
+            keep_alive: "30m",
+            options: { temperature: opts.temperature ?? 0, num_ctx: numCtx },
+            messages,
           },
-        },
-      })) as { usage?: { input_tokens?: unknown; output_tokens?: unknown } };
-      recordUsage(response.usage?.input_tokens, response.usage?.output_tokens);
-      content = readOpenAIResponseText(response);
-      break;
-    }
-    case "anthropic": {
-      const response = (await request("POST", "/messages", {
-        model: opts.model,
-        max_tokens: Math.max(1024, Number(getPref("maxOutputTokens")) || 16384),
-        temperature: opts.temperature ?? 0,
-        system: opts.system,
-        messages: [{ role: "user", content: opts.user }],
-        output_config: {
-          format: { type: "json_schema", schema: opts.schema },
-        },
-      })) as {
-        content?: { type?: unknown; text?: unknown }[];
-        usage?: { input_tokens?: unknown; output_tokens?: unknown };
-      };
-      recordUsage(response.usage?.input_tokens, response.usage?.output_tokens);
-      const text = response.content?.find((part) => part.type === "text")?.text;
-      content = typeof text === "string" ? text : null;
-      break;
-    }
-    case "openai-compatible": {
+          { native: true },
+        )) as {
+          message?: { content?: unknown };
+          prompt_eval_count?: unknown;
+          eval_count?: unknown;
+        };
+        recordUsage(response.prompt_eval_count, response.eval_count);
+        const value = response.message?.content;
+        content = typeof value === "string" ? value : null;
+        break;
+      }
+      // One OpenAI-compatible chat call for every other HTTP endpoint. Some
+      // servers ignore response_format but still return valid JSON when
+      // instructed; parseLooseJSON tolerates that.
       const response = (await request("POST", "/chat/completions", {
         model: opts.model,
         temperature: opts.temperature ?? 0,
@@ -957,27 +826,6 @@ export async function chatJSON(opts: {
       );
       const value = response.choices?.[0]?.message?.content;
       content = typeof value === "string" ? value : null;
-      break;
-    }
-    default: {
-      const response = (await request("POST", "/api/chat", {
-        model: opts.model,
-        stream: false,
-        format: opts.schema,
-        keep_alive: "30m",
-        options: {
-          temperature: opts.temperature ?? 0,
-          num_ctx: contextLimitTokens(),
-        },
-        messages,
-      })) as {
-        message?: { content?: unknown };
-        prompt_eval_count?: unknown;
-        eval_count?: unknown;
-      };
-      recordUsage(response.prompt_eval_count, response.eval_count);
-      const value = response.message?.content;
-      content = typeof value === "string" ? value : null;
     }
   }
 
@@ -986,12 +834,14 @@ export async function chatJSON(opts: {
   return parseLooseJSON(content);
 }
 
-/** Models required by current settings that are missing on the server. */
+/** Configured models not present in the server's model list. */
 export function missingModels(status: OllamaStatus): string[] {
-  if (isCloudProvider()) return [];
+  // Subprocess providers manage their own models; nothing to check.
+  if (isSubprocessProvider() || status.models.length === 0) return [];
   const wanted = [String(getPref("skimModel")), String(getPref("tldrModel"))];
   return [...new Set(wanted)].filter(
     (wantedModel) =>
+      wantedModel &&
       !status.models.includes(wantedModel) &&
       !status.models.some((model) => model.startsWith(wantedModel)),
   );

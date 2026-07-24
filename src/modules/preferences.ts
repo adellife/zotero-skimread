@@ -48,26 +48,14 @@ export function onPrefsLoad(window: Window) {
     });
   }
 
-  // --- Provider selector: one flat list, with only the relevant fields shown.
+  // --- Provider selector: OpenAI-compatible (HTTP) or a subscription CLI.
   const sel = $("apiType") as (HTMLElement & { value: string }) | null;
   if (sel) {
-    sel.value = String(getPref("apiType") || "ollama");
-
-    // Which field rows each provider needs.
-    const usesUrl = new Set(["ollama", "openai-compatible"]);
-    const usesLocalModels = new Set([
-      "ollama",
-      "openai-compatible",
-      "openai-api",
-      "anthropic",
-    ]);
-    const usesNumCtx = new Set(["ollama"]);
-    const isCloud = new Set([
-      "openai-api",
-      "anthropic",
-      "codex-app-server",
-      "claude-code",
-    ]);
+    const current = String(getPref("apiType") || "openai-compatible");
+    sel.value =
+      current === "codex-app-server" || current === "claude-code"
+        ? current
+        : "openai-compatible";
 
     const set = (id: string, show: boolean) => {
       const el = $(id) as HTMLElement | null;
@@ -75,20 +63,21 @@ export function onPrefsLoad(window: Window) {
     };
 
     const refresh = () => {
-      const p = sel.value;
-      set("url-row", usesUrl.has(p));
-      set("compat-key-row", p === "openai-compatible");
-      set("skim-model-row", usesLocalModels.has(p));
-      set("tldr-model-row", usesLocalModels.has(p));
-      set("num-ctx-row", usesNumCtx.has(p));
-      // Consent is required for any provider that can send text off-machine —
-      // the cloud APIs, the CLI logins, and a remote OpenAI-compatible server.
-      set("consent-row", isCloud.has(p) || p === "openai-compatible");
-      set("cloud-settings", isCloud.has(p));
-      set("openai-key-row", p === "openai-api");
-      set("anthropic-key-row", p === "anthropic");
-      set("codex-settings", p === "codex-app-server");
-      set("claude-settings", p === "claude-code");
+      const http = sel.value === "openai-compatible";
+      const codex = sel.value === "codex-app-server";
+      const claude = sel.value === "claude-code";
+      set("url-row", http);
+      set("compat-key-row", http);
+      set("skim-model-row", http);
+      set("tldr-model-row", http);
+      set("num-ctx-row", http);
+      set("ollama-ctx-row", http);
+      // Consent covers the CLI logins and any remote OpenAI-compatible endpoint;
+      // localhost never triggers the consent check at request time.
+      set("consent-row", true);
+      set("cloud-settings", codex || claude);
+      set("codex-settings", codex);
+      set("claude-settings", claude);
     };
 
     const save = () => {
@@ -101,6 +90,35 @@ export function onPrefsLoad(window: Window) {
     sel.addEventListener("command", save);
     sel.addEventListener("change", save);
   }
+
+  // --- model picker: populate the datalist from the server's models ---
+  const populateModels = async () => {
+    const list = $("model-list") as HTMLElement | null;
+    if (!list) return;
+    const result = $("test-result") as HTMLElement | null;
+    if (result) result.textContent = getString("status-checking");
+    const status = await checkStatus();
+    list.textContent = "";
+    for (const model of status.models) {
+      const opt = doc.createElementNS(
+        "http://www.w3.org/1999/xhtml",
+        "option",
+      ) as HTMLOptionElement;
+      opt.value = model;
+      list.appendChild(opt);
+    }
+    if (result) {
+      result.textContent = status.ok
+        ? `${status.models.length} models available`
+        : `${providerLabel()} not reachable`;
+    }
+  };
+  const refreshModelsBtn = $("refresh-models") as HTMLButtonElement | null;
+  if (refreshModelsBtn) {
+    refreshModelsBtn.addEventListener("click", () => void populateModels());
+  }
+  // Populate once on open so the model fields offer a dropdown immediately.
+  void populateModels();
 
   // --- custom labels editor ---
   const area = $("customLabels") as HTMLTextAreaElement | null;
