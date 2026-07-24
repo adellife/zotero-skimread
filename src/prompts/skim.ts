@@ -2,7 +2,7 @@
  * Versioned prompts for skim classification with dynamic label sets.
  * Bump PROMPT_VERSION whenever any prompt text changes (invalidates cache).
  */
-export const PROMPT_VERSION = 9;
+export const PROMPT_VERSION = 11;
 
 export interface LabelDef {
   key: string; // stable slug, e.g. "theory"
@@ -130,6 +130,36 @@ export function buildSkimSchema(labels: LabelDef[]) {
 }
 
 /** Schema for global selection: unselected sentences are intentionally omitted. */
+/**
+ * Prompt for one passage (band/section) in hierarchical map-reduce selection.
+ * Asking for a fixed small count per passage guarantees the whole document is
+ * covered instead of the model concentrating on one region.
+ */
+export function buildBandSelectionPrompt(
+  sentences: {
+    id: number;
+    pageIndex: number;
+    section: string;
+    text: string;
+  }[],
+  targetCount: number,
+  labels: LabelDef[] = DEFAULT_LABELS,
+): string {
+  const keys = labels.map((label) => label.key).join(" | ");
+  return [
+    `This is ONE passage from a larger document. Select the ${targetCount} most useful sentences here to highlight for skimming (at most ${targetCount + 1}).`,
+    "Pick the most informative ones and spread them across the passage; do not cluster them together.",
+    "Use the numeric id exactly as supplied. Do not return a sentence more than once.",
+    "Return ONLY this JSON, no prose or code fences:",
+    `{"selected":[{"id":<integer>,"label":"<one of: ${keys}>","importance":<0..1>}]}`,
+    "",
+    ...sentences.map(
+      (sentence) =>
+        `${sentence.id} | page ${sentence.pageIndex + 1} | section ${sentence.section} | ${sentence.text}`,
+    ),
+  ].join("\n");
+}
+
 export function buildDocumentSelectionSchema(labels: LabelDef[]) {
   return {
     type: "object",

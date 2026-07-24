@@ -126,6 +126,19 @@ function renderPanel(body: HTMLElement) {
   modeRow.append(modeLab, select);
   wrap.append(modeRow);
 
+  // balanced coverage toggle (hierarchical map-reduce selection)
+  const balRow = doc.createElement("label");
+  balRow.style.cssText =
+    "display:flex;align-items:center;gap:6px;font-size:12px;";
+  const balCb = doc.createElement("input");
+  balCb.type = "checkbox";
+  balCb.checked = getPref("balancedCoverage") !== false;
+  balCb.addEventListener("change", () =>
+    setPref("balancedCoverage", balCb.checked),
+  );
+  balRow.append(balCb, doc.createTextNode(getString("control-balanced")));
+  wrap.append(balRow);
+
   // action buttons
   const btnRow = doc.createElement("div");
   btnRow.style.cssText = "display:flex;gap:6px;";
@@ -478,15 +491,22 @@ async function refreshRunSummary(body: HTMLElement) {
   const { tabID, attachment } = currentContext(body);
   if (!attachment || (tabID && isRunning(tabID))) return;
   const summary = await cacheSummary(attachment);
+  const tokens =
+    summary.tokensInput || summary.tokensOutput
+      ? ` · ${summary.tokensInput.toLocaleString()} in / ${summary.tokensOutput.toLocaleString()} out tokens`
+      : "";
+  const coverage = summary.pageSpan
+    ? ` across ${summary.pagesCovered}/${summary.pageSpan} pages`
+    : "";
   if (summary.state === "complete") {
     setProgress(
       body,
-      `✓ Complete — ${summary.selections} highlights from ${summary.considered} sentences`,
+      `✓ Complete — ${summary.selections} highlights${coverage}${tokens}`,
     );
   } else if (summary.state === "partial") {
     setProgress(
       body,
-      `◐ Partial — ${summary.considered} sentences processed so far. Generate resumes.`,
+      `◐ Partial — ${summary.considered} sentences processed${tokens}. Generate resumes.`,
     );
   }
 }

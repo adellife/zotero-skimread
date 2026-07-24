@@ -4,7 +4,7 @@ import {
   buildDocumentSelectionPrompt,
   validateDocumentSelection,
 } from "../src/prompts/skim";
-import { chunkSentences } from "../src/modules/skim";
+import { chunkSentences, splitIntoBands } from "../src/modules/skim";
 
 describe("document selection", function () {
   it("keeps stable IDs and page context in the full-document prompt", function () {
@@ -173,6 +173,25 @@ describe("document selection", function () {
         "introduction",
       );
       assert.strictEqual(chunks[1]?.[0]?.section, "methods");
+    });
+
+    it("splits into the requested number of contiguous bands, order preserved", function () {
+      const sentences = Array.from({ length: 40 }, (_, index) =>
+        sentence(Math.floor(index / 2), "body", `s${index} ` + "x".repeat(60)),
+      );
+      const bands = splitIntoBands(sentences, 8, 100_000);
+      assert.lengthOf(bands, 8);
+      const flattened = bands.flat();
+      assert.lengthOf(flattened, 40);
+      flattened.forEach((entry, index) =>
+        assert.strictEqual(entry.text, sentences[index].text),
+      );
+      // each band is a contiguous run
+      assert.strictEqual(bands[0][0].text, "s0 " + "x".repeat(60));
+      assert.strictEqual(
+        bands[7][bands[7].length - 1].text,
+        sentences[39].text,
+      );
     });
   });
 });

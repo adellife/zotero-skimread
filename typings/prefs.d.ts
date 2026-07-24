@@ -24,6 +24,7 @@ declare namespace _ZoteroTypes {
       "skimModel": string;
       "tldrModel": string;
       "tldrWithSkim": boolean;
+      "balancedCoverage": boolean;
       "highlightDensity": number;
       "highlightOpacity": number;
       "showFlags": boolean;

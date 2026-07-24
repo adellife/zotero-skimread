@@ -15,6 +15,7 @@ pref("numCtx", 8192);
 pref("skimModel", "gemma4:e4b");
 pref("tldrModel", "mistral-small3.2:24b");
 pref("tldrWithSkim", false);
+pref("balancedCoverage", true);
 pref("highlightDensity", 3);
 pref("highlightOpacity", 25);
 pref("showFlags", true);

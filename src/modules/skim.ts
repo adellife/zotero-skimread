@@ -17,8 +17,10 @@ import { getPref } from "../utils/prefs";
 import {
   chatJSON,
   contextLimitTokens,
+  getTokenUsage,
   modelForProvider,
   providerLabel,
+  resetTokenUsage,
 } from "../llm/ollama";
 import {
   PROMPT_VERSION,
@@ -26,6 +28,7 @@ import {
   DEFAULT_LABELS,
   DISCOVER_SCHEMA,
   DISCOVER_SYSTEM,
+  buildBandSelectionPrompt,
   buildDocumentSelectionPrompt,
   buildDocumentSelectionSchema,
   buildSkimSystem,
@@ -72,6 +75,11 @@ interface CachePayload {
   savedAnnotationKeys?: string[];
   /** Cached TL;DR summary from the explicit “TL;DR” action. */
   tldr?: string;
+  /** Number of body pages that had candidate sentences (coverage denominator). */
+  pageSpan?: number;
+  /** Cumulative tokens spent producing this run (input/read and output). */
+  tokensInput?: number;
+  tokensOutput?: number;
 }
 
 interface JobState {
@@ -220,6 +228,12 @@ export interface CacheSummary {
   selections: number;
   /** sentences the model has looked at so far */
   considered: number;
+  /** distinct pages that received a highlight */
+  pagesCovered: number;
+  /** body pages that had candidate sentences */
+  pageSpan: number;
+  tokensInput: number;
+  tokensOutput: number;
 }
 
 /** Persistent run summary for the sidebar's idle status line. */
@@ -227,14 +241,28 @@ export async function cacheSummary(
   attachment: Zotero.Item,
 ): Promise<CacheSummary> {
   const payload = await cacheRead(await cacheKey(attachment));
-  if (!payload) return { state: "none", selections: 0, considered: 0 };
-  const selections = payload.sentences.filter(
+  if (!payload) {
+    return {
+      state: "none",
+      selections: 0,
+      considered: 0,
+      pagesCovered: 0,
+      pageSpan: 0,
+      tokensInput: 0,
+      tokensOutput: 0,
+    };
+  }
+  const kept = payload.sentences.filter(
     (sentence) => sentence.label !== "none" && sentence.confidence >= 0.5,
-  ).length;
+  );
   return {
     state: payload.complete ? "complete" : "partial",
-    selections,
+    selections: kept.length,
     considered: payload.classifiedCount,
+    pagesCovered: new Set(kept.map((s) => s.pageIndex)).size,
+    pageSpan: payload.pageSpan || 0,
+    tokensInput: payload.tokensInput || 0,
+    tokensOutput: payload.tokensOutput || 0,
   };
 }
 
@@ -324,61 +352,91 @@ function segmentSentences(
   return out;
 }
 
+// Multilingual (EN/FR/ES/DE/IT) heading markers. Only "references" causes text
+// to be dropped, so it is kept tight; the others are context hints and can be
+// liberal without harm.
 const SECTION_MARKERS: [RegExp, DocumentSection][] = [
   [
-    /\b(?:references|bibliography|works cited|literature cited|cited literature|reference list)\b/i,
+    /\b(?:references|bibliography|works cited|literature cited|cited literature|reference list|r[ée]f[ée]rences?|bibliographie|ouvrages cit[ée]s|litt[ée]rature cit[ée]e|bibliograf(?:y|ía|ia)|referencias|literaturverzeichnis|riferimenti bibliografici)\b/i,
     "references",
   ],
-  [/\b(?:appendix|supplementary materials?)\b/i, "appendix"],
-  [/\b(?:abstract|summary)\b/i, "abstract"],
-  [/\b(?:introduction|background)\b/i, "introduction"],
   [
-    /\b(?:materials? and methods?|methods?|methodology|experimental setup)\b/i,
+    /\b(?:appendix|supplementary materials?|annexes?|appendice|anhang)\b/i,
+    "appendix",
+  ],
+  [
+    /\b(?:abstract|summary|r[ée]sum[ée]|resumen|zusammenfassung|riassunto)\b/i,
+    "abstract",
+  ],
+  [
+    /\b(?:introduction|background|introducci[óo]n|einleitung|introduzione)\b/i,
+    "introduction",
+  ],
+  [
+    /\b(?:materials? and methods?|methods?|methodology|experimental setup|m[ée]thodes?|m[ée]thodologie|mat[ée]riel et m[ée]thodes|corpus|metodolog[íi]a|methoden|metodi)\b/i,
     "methods",
   ],
-  [/\b(?:results?|findings?)\b/i, "results"],
-  [/\b(?:discussion|analysis)\b/i, "discussion"],
-  [/\b(?:conclusions?|concluding remarks?)\b/i, "conclusion"],
+  [
+    /\b(?:results?|findings?|r[ée]sultats?|resultados|ergebnisse|risultati)\b/i,
+    "results",
+  ],
+  [
+    /\b(?:discussion|analys[ei]s|analyse|discusi[óo]n|diskussion|discussione)\b/i,
+    "discussion",
+  ],
+  [
+    /\b(?:conclusions?|concluding remarks?|conclusi[óo]n|schluss|fazit|conclusione)\b/i,
+    "conclusion",
+  ],
 ];
 
 /**
- * Infer a coarse document role from headings near the top of each page. The
- * role is sent to the whole-document selector as structural context; it is
- * deliberately not treated as a replacement for the model's judgement.
+ * Infer a coarse document role from a heading at the very top of a page. The
+ * role is context for the selector; only "references" gates dropping, so the
+ * window is kept short (headings sit at the top) to avoid catching body text.
  */
 function sectionAtPageStart(page: PageText): DocumentSection | null {
-  const lead = page.text.slice(0, 900);
+  const lead = page.text.slice(0, 160);
   for (const [marker, section] of SECTION_MARKERS) {
     if (marker.test(lead)) return section;
   }
   return null;
 }
 
-/** Attach the active paper section to each sentence, carrying headings forward. */
+// A title/author/affiliation line is short; running prose is long. The first
+// long sentence marks where the body begins.
+const FRONT_MATTER_MAX_LEN = 120;
+
+/**
+ * Attach the active paper section to each sentence, carrying headings forward.
+ * Default is "body" (not "front matter") so that a paper with no early heading
+ * — common in the humanities — is never wholly discarded. Only the leading
+ * short lines on the first page (title, authors, affiliations) are treated as
+ * front matter.
+ */
 function withDocumentSections(
   pages: PageText[],
   sentences: ExtractedSentence[],
 ): typeof sentences {
   const sections = new Map<number, DocumentSection>();
-  let active: DocumentSection = "front matter";
-  let anyDetected = false;
+  let active: DocumentSection = "body";
   for (const p of pages) {
     const detected = sectionAtPageStart(p);
-    if (detected) {
-      active = detected;
-      anyDetected = true;
-    }
+    if (detected) active = detected;
     sections.set(p.pageIndex, active);
   }
-  // Documents without recognizable headings (many books, slides, reports)
-  // must not end up wholly labeled "front matter": treat them as body text.
-  if (!anyDetected) {
-    for (const p of pages) sections.set(p.pageIndex, "body");
-  }
-  return sentences.map((sentence) => ({
+  const out = sentences.map((sentence) => ({
     ...sentence,
     section: sections.get(sentence.pageIndex) || "body",
   }));
+  // Mark the page-0 title/author block: leading short sentences up to the first
+  // running-prose sentence. Sentences are ordered page-then-position.
+  for (const sentence of out) {
+    if (sentence.pageIndex !== 0) break;
+    if (sentence.text.length >= FRONT_MATTER_MAX_LEN) break;
+    sentence.section = "front matter";
+  }
+  return out;
 }
 
 /**
@@ -557,6 +615,73 @@ async function selectDocument(
       ? `${providerLabel()} selection failed: ${lastError.slice(0, 160)}`
       : "Model could not return a valid full-document selection",
   );
+}
+
+// ---------- hierarchical (map-reduce) selection ----------
+
+/**
+ * Select ~targetCount sentences from a single passage. Returns [] on failure
+ * so one weak band never aborts the whole run.
+ */
+async function selectBand(
+  labels: LabelDef[],
+  band: ExtractedSentence[],
+  targetCount: number,
+  isCancelled: () => boolean,
+): Promise<ClassifiedSentence[]> {
+  const model = modelForProvider(String(getPref("skimModel")));
+  const system = buildSkimSystem(labels);
+  const schema = buildDocumentSelectionSchema(labels);
+  const user = buildBandSelectionPrompt(
+    band.map((sentence, id) => ({ ...sentence, id })),
+    targetCount,
+    labels,
+  );
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (isCancelled()) return [];
+    try {
+      const raw = await chatJSON({
+        model,
+        system,
+        user:
+          (attempt
+            ? "Your previous response was invalid JSON. Return only valid JSON.\n\n"
+            : "") + user,
+        schema,
+      });
+      const selected = validateDocumentSelection(raw, labels, band.length);
+      if (!selected) continue;
+      return selected.map((result) => ({
+        ...band[result.id],
+        label: result.label,
+        confidence: result.importance,
+      }));
+    } catch (error) {
+      ztoolkit.log("skimread band selection error", error);
+    }
+  }
+  return [];
+}
+
+/**
+ * Split the ordered sentences into contiguous bands of roughly equal size, so
+ * each band is processed on its own and the whole document is covered. Bands
+ * that exceed the context budget are sub-split.
+ */
+export function splitIntoBands(
+  sentences: ExtractedSentence[],
+  bandCount: number,
+  budgetTokens: number,
+): ExtractedSentence[][] {
+  if (sentences.length === 0) return [];
+  const perBand = Math.ceil(sentences.length / Math.max(1, bandCount));
+  const out: ExtractedSentence[][] = [];
+  for (let i = 0; i < sentences.length; i += perBand) {
+    const group = sentences.slice(i, i + perBand);
+    if (estimateTokens(group) <= budgetTokens) out.push(group);
+    else out.push(...chunkSentences(group, budgetTokens));
+  }
+  return out;
 }
 
 // ---------- selection & painting ----------
@@ -846,6 +971,9 @@ export async function runSkim(
       return;
     }
 
+    // Count tokens spent from here on; added to the cached totals at the end.
+    resetTokenUsage();
+
     // ---- extract (needed both for fresh runs and to resume partial ones) ----
     cb.onStatus("Extracting text…");
     const pageCount = getPageCount(reader);
@@ -893,53 +1021,94 @@ export async function runSkim(
     if (job.cancelled) return;
     cb.onLabels?.(labels);
 
-    // ---- document selection (single chunk for papers; chapter/context-sized
-    // chunks for books and small-context providers) ----
+    // ---- document selection ----
+    // "balanced": hierarchical map-reduce — split into contiguous bands and
+    // select a fixed budget from each, guaranteeing coverage across the whole
+    // document. Otherwise: single-pass whole-document (or context-sized chunk)
+    // selection, which is faster but can concentrate highlights.
     const budget = payload.chunkBudget ?? selectionBudget();
     payload.chunkBudget = budget;
-    const chunks = chunkSentences(sentences, budget);
     const isCancelled = () => job.cancelled || !isReaderAlive(reader);
+    const balanced = getPref("balancedCoverage") !== false;
 
-    // Resume: skip chunks whose sentences were already consumed. Chunking is
+    const pageSpan =
+      sentences.reduce((max, s) => Math.max(max, s.pageIndex), 0) + 1;
+    payload.pageSpan = pageSpan;
+    let units: ExtractedSentence[][];
+    let perUnitTarget = 0;
+    if (balanced) {
+      // ~1 band per 1.8 pages, but never so many that a band has too few
+      // sentences to choose from (≥ ~6 candidates each).
+      const bandCount = Math.max(
+        3,
+        Math.min(
+          12,
+          Math.round(pageSpan / 1.8),
+          Math.floor(sentences.length / 6) || 3,
+        ),
+      );
+      units = splitIntoBands(sentences, bandCount, budget);
+      const targetTotal = Math.min(
+        pageSpan * 3,
+        Math.max(6, Math.round(pageSpan * 1.5)),
+      );
+      perUnitTarget = Math.max(1, Math.round(targetTotal / units.length));
+    } else {
+      units = chunkSentences(sentences, budget);
+    }
+
+    // Resume: skip units whose sentences were already consumed. Splitting is
     // deterministic for the same extraction, settings, and prompt version.
     let consumed = 0;
-    let startChunk = 0;
+    let startUnit = 0;
     while (
-      startChunk < chunks.length &&
-      consumed + chunks[startChunk].length <= payload.classifiedCount
+      startUnit < units.length &&
+      consumed + units[startUnit].length <= payload.classifiedCount
     ) {
-      consumed += chunks[startChunk].length;
-      startChunk++;
+      consumed += units[startUnit].length;
+      startUnit++;
     }
 
-    for (let index = startChunk; index < chunks.length; index++) {
+    for (let index = startUnit; index < units.length; index++) {
       if (isCancelled()) break;
-      const chunk = chunks[index];
+      const unit = units[index];
       cb.onStatus(
-        chunks.length === 1
+        units.length === 1
           ? `Selecting from all ${sentences.length} sentences…`
-          : `Selecting highlights — part ${index + 1} of ${chunks.length} (${chunk.length} sentences)…`,
+          : `Selecting highlights — part ${index + 1} of ${units.length}…`,
       );
-      const selected = await selectDocument(labels, chunk, isCancelled);
+      const selected = balanced
+        ? await selectBand(labels, unit, perUnitTarget, isCancelled)
+        : await selectDocument(labels, unit, isCancelled);
       if (isCancelled()) break;
       payload.sentences.push(...selected);
-      consumed += chunk.length;
+      consumed += unit.length;
       payload.classifiedCount = consumed;
       await cacheWrite(key, payload);
-      await paint(payload); // progressive: chapters appear as they finish
+      await paint(payload); // progressive: bands appear as they finish
     }
 
+    const finalizeTokens = () => {
+      const usage = getTokenUsage();
+      payload!.tokensInput = (payload!.tokensInput || 0) + usage.input;
+      payload!.tokensOutput = (payload!.tokensOutput || 0) + usage.output;
+    };
+
     if (job.cancelled || !isReaderAlive(reader)) {
+      finalizeTokens();
+      await cacheWrite(key, payload);
       cb.onError("Stopped — progress saved, Generate resumes");
       return;
     }
     payload.complete = true;
+    finalizeTokens();
     await cacheWrite(key, payload);
     cb.onDone(await paint(payload));
 
     // Optional: produce the TL;DR in the same run, with the same (skim) model,
     // reusing the text already extracted above — no second model load.
     if (getPref("tldrWithSkim") && !payload.tldr && !isCancelled()) {
+      resetTokenUsage(); // count TL;DR tokens separately, then fold them in
       try {
         cb.onStatus("Summarizing (TL;DR)…");
         const title = String(attachment.getField("title") || "").trim();
@@ -951,6 +1120,7 @@ export async function runSkim(
             modelForProvider(String(getPref("skimModel"))),
           );
           payload.tldr = tldr;
+          finalizeTokens();
           await cacheWrite(key, payload);
           cb.onTldr?.(tldr);
         }

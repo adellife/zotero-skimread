@@ -582,7 +582,9 @@ async function claudeCodeJSON(opts: {
       result?: unknown;
       is_error?: unknown;
       error?: unknown;
+      usage?: { input_tokens?: unknown; output_tokens?: unknown };
     };
+    recordUsage(envelope.usage?.input_tokens, envelope.usage?.output_tokens);
     if (envelope.is_error) {
       // The CLI puts the human-readable reason (e.g. "Not logged in · Please
       // run /login") in `result`; prefer it over a generic message.
@@ -838,9 +840,39 @@ export function contextLimitTokens(): number {
   return Math.max(2048, Number(getPref("numCtx")) || 8192);
 }
 
+// ---------- token usage accounting ----------
+
+export interface TokenUsage {
+  input: number;
+  output: number;
+}
+
+let usageTotal: TokenUsage = { input: 0, output: 0 };
+
+/** Reset the running token counter (call at the start of a run). */
+export function resetTokenUsage(): void {
+  usageTotal = { input: 0, output: 0 };
+}
+
+/** Read the tokens consumed since the last reset. */
+export function getTokenUsage(): TokenUsage {
+  return { ...usageTotal };
+}
+
+function num(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+/** Add a response's usage to the running total, across provider shapes. */
+export function recordUsage(input: unknown, output: unknown): void {
+  usageTotal.input += num(input);
+  usageTotal.output += num(output);
+}
+
 /**
  * Structured chat completion. The caller owns prompt/schema validation; this
- * module owns all transport and provider-specific response extraction.
+ * module owns all transport and provider-specific response extraction. Token
+ * usage is accumulated into the module counter (getTokenUsage).
  */
 export async function chatJSON(opts: {
   model: string;
@@ -861,7 +893,7 @@ export async function chatJSON(opts: {
     case "claude-code":
       return claudeCodeJSON(opts);
     case "openai-api": {
-      const response = await request("POST", "/responses", {
+      const response = (await request("POST", "/responses", {
         model: opts.model,
         // Paper text is sensitive. Do not ask OpenAI to retain this request.
         store: false,
@@ -878,7 +910,8 @@ export async function chatJSON(opts: {
             schema: opts.schema,
           },
         },
-      });
+      })) as { usage?: { input_tokens?: unknown; output_tokens?: unknown } };
+      recordUsage(response.usage?.input_tokens, response.usage?.output_tokens);
       content = readOpenAIResponseText(response);
       break;
     }
@@ -892,7 +925,11 @@ export async function chatJSON(opts: {
         output_config: {
           format: { type: "json_schema", schema: opts.schema },
         },
-      })) as { content?: { type?: unknown; text?: unknown }[] };
+      })) as {
+        content?: { type?: unknown; text?: unknown }[];
+        usage?: { input_tokens?: unknown; output_tokens?: unknown };
+      };
+      recordUsage(response.usage?.input_tokens, response.usage?.output_tokens);
       const text = response.content?.find((part) => part.type === "text")?.text;
       content = typeof text === "string" ? text : null;
       break;
@@ -910,7 +947,14 @@ export async function chatJSON(opts: {
             schema: opts.schema,
           },
         },
-      })) as { choices?: { message?: { content?: unknown } }[] };
+      })) as {
+        choices?: { message?: { content?: unknown } }[];
+        usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
+      };
+      recordUsage(
+        response.usage?.prompt_tokens,
+        response.usage?.completion_tokens,
+      );
       const value = response.choices?.[0]?.message?.content;
       content = typeof value === "string" ? value : null;
       break;
@@ -926,7 +970,12 @@ export async function chatJSON(opts: {
           num_ctx: contextLimitTokens(),
         },
         messages,
-      })) as { message?: { content?: unknown } };
+      })) as {
+        message?: { content?: unknown };
+        prompt_eval_count?: unknown;
+        eval_count?: unknown;
+      };
+      recordUsage(response.prompt_eval_count, response.eval_count);
       const value = response.message?.content;
       content = typeof value === "string" ? value : null;
     }
