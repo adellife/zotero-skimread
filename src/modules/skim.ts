@@ -105,7 +105,9 @@ type DocumentSection =
 const jobs = new Map<string, JobState>(); // key = reader tabID
 
 const MIN_LEN = 40;
-const MAX_LEN = 600;
+// Humanities/French sentences run long; keep them as candidates instead of
+// dropping. Over-long segments are split at clause boundaries (splitLongSegment).
+const MAX_LEN = 800;
 const DISCOVERY_SAMPLE_CHARS = 6000;
 const MAX_HIGHLIGHTS_PER_PAGE = 10;
 const CONTEXT_RESERVE_TOKENS = 6000;
@@ -252,6 +254,56 @@ export async function hasSavedAnnotations(
 
 // ---------- segmentation ----------
 
+/** Map a page.text [startText, endText) span to a candidate sentence. */
+function pushSpan(
+  page: PageText,
+  out: Omit<ExtractedSentence, "pageIndex" | "section">[],
+  startText: number,
+  endText: number,
+): void {
+  const text = page.text.slice(startText, endText).trim();
+  if (text.length < MIN_LEN || !/[a-zA-Z]{3}/.test(text)) return;
+  let startChar = -1;
+  let endChar = -1;
+  for (let i = startText; i < endText && i < page.charMap.length; i++) {
+    if (page.charMap[i] >= 0) {
+      if (startChar < 0) startChar = page.charMap[i];
+      endChar = page.charMap[i] + 1;
+    }
+  }
+  if (startChar >= 0 && endChar > startChar) {
+    out.push({ startChar, endChar, text });
+  }
+}
+
+/**
+ * Cut an over-long segment (a genuinely long sentence, or a run-on produced by
+ * column/reading-order jumble) into clause-sized pieces so its content still
+ * becomes candidates instead of being dropped. Offsets are relative to `base`.
+ */
+function splitLongSegment(
+  page: PageText,
+  out: Omit<ExtractedSentence, "pageIndex" | "section">[],
+  base: number,
+  text: string,
+): void {
+  const boundary = /[.;:!?»)]\s+/g;
+  const cuts: number[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = boundary.exec(text))) cuts.push(m.index + m[0].length);
+  cuts.push(text.length);
+  let start = 0;
+  for (const cut of cuts) {
+    if (cut - start >= MAX_LEN * 0.6) {
+      pushSpan(page, out, base + start, base + cut);
+      start = cut;
+    }
+  }
+  if (text.length - start >= MIN_LEN) {
+    pushSpan(page, out, base + start, base + text.length);
+  }
+}
+
 function segmentSentences(
   page: PageText,
 ): Omit<ExtractedSentence, "pageIndex" | "section">[] {
@@ -259,22 +311,14 @@ function segmentSentences(
   if (!page.text) return out;
   const seg = new Intl.Segmenter("en", { granularity: "sentence" });
   for (const s of seg.segment(page.text)) {
-    const text = s.segment.trim();
-    if (text.length < MIN_LEN || text.length > MAX_LEN) continue;
-    if (!/[a-zA-Z]{3}/.test(text)) continue;
-    const startText =
-      s.index + (s.segment.length - s.segment.trimStart().length);
-    const endText = startText + text.length;
-    let startChar = -1;
-    let endChar = -1;
-    for (let i = startText; i < endText && i < page.charMap.length; i++) {
-      if (page.charMap[i] >= 0) {
-        if (startChar < 0) startChar = page.charMap[i];
-        endChar = page.charMap[i] + 1;
-      }
-    }
-    if (startChar >= 0 && endChar > startChar) {
-      out.push({ startChar, endChar, text });
+    const raw = s.segment;
+    const trimmed = raw.trim();
+    if (trimmed.length < MIN_LEN || !/[a-zA-Z]{3}/.test(trimmed)) continue;
+    const base = s.index + (raw.length - raw.trimStart().length);
+    if (trimmed.length <= MAX_LEN) {
+      pushSpan(page, out, base, base + trimmed.length);
+    } else {
+      splitLongSegment(page, out, base, trimmed);
     }
   }
   return out;

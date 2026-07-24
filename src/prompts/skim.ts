@@ -2,7 +2,7 @@
  * Versioned prompts for skim classification with dynamic label sets.
  * Bump PROMPT_VERSION whenever any prompt text changes (invalidates cache).
  */
-export const PROMPT_VERSION = 8;
+export const PROMPT_VERSION = 9;
 
 export interface LabelDef {
   key: string; // stable slug, e.g. "theory"
@@ -89,6 +89,7 @@ export function buildDocumentSelectionPrompt(
   return [
     "Choose the sentences worth highlighting while skimming this entire document.",
     `Select between ${minTotal} and ${maxTotal} sentences in total for these ${pageCount} pages — aim for roughly 2 per page.`,
+    "Spread selections across the WHOLE document — early, middle, and late pages. Do not concentrate them in the conclusion or on any single page.",
     "Cover every major section; do not leave long stretches of the document without a highlight.",
     `Return at most ${maxPerPage} selected sentences per page.`,
     "Use the numeric id exactly as supplied. Do not return a sentence more than once.",
