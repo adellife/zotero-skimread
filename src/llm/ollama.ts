@@ -138,8 +138,24 @@ async function request(
     "Content-Type": "application/json",
     ...(options.headers || {}),
   };
-  if (isCloudProvider()) Object.assign(headers, cloudHeaders());
-  else assertLocalhost(url);
+  if (apiType() === "openai-compatible") {
+    // Local server (Ollama-style) needs no key or consent. A remote
+    // OpenAI-compatible endpoint (OpenRouter, hosted vLLM) may need a key and
+    // does send text off-machine, so it requires explicit cloud consent.
+    const host = url.replace(/^https?:\/\//, "").split(/[/:]/)[0];
+    const local = ["localhost", "127.0.0.1", "[::1]", "::1"].includes(host);
+    if (!local && !getPref("cloudConsent")) {
+      throw new Error(
+        "This is a remote endpoint. Enable the cloud-consent checkbox in SkimRead settings to allow sending text off your computer.",
+      );
+    }
+    const key = String(getPref("openaiCompatibleKey") || "").trim();
+    if (key) headers.Authorization = `Bearer ${key}`;
+  } else if (isCloudProvider()) {
+    Object.assign(headers, cloudHeaders());
+  } else {
+    assertLocalhost(url);
+  }
 
   const xhr = await Zotero.HTTP.request(method, url, {
     headers,

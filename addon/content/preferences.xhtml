@@ -33,18 +33,25 @@
   </hbox>
 
   <vbox
-    id="zotero-prefpane-__addonRef__-cloud-settings"
-    style="display: none; gap: 8px"
+    id="zotero-prefpane-__addonRef__-consent-row"
+    style="display: none; gap: 6px"
   >
     <description style="max-width: 520px; color: #9a3412">
-      Cloud mode sends extracted PDF text to the selected provider. SkimRead
-      never falls back to cloud automatically.
+      This sends extracted PDF text off your computer to the selected provider
+      (a remote endpoint for OpenAI-compatible). SkimRead never falls back to a
+      remote provider automatically.
     </description>
     <checkbox
       id="zotero-prefpane-__addonRef__-cloudConsent"
       preference="cloudConsent"
       label="I understand that extracted PDF text will leave this computer"
     />
+  </vbox>
+
+  <vbox
+    id="zotero-prefpane-__addonRef__-cloud-settings"
+    style="display: none; gap: 8px"
+  >
     <hbox id="zotero-prefpane-__addonRef__-openai-key-row" align="center">
       <html:label for="zotero-prefpane-__addonRef__-openaiApiKey"
         >OpenAI API key</html:label
@@ -187,6 +194,18 @@
       type="text"
       id="zotero-prefpane-__addonRef__-ollamaUrl"
       preference="ollamaUrl"
+      style="width: 260px"
+    ></html:input>
+  </hbox>
+
+  <hbox id="zotero-prefpane-__addonRef__-compat-key-row" align="center">
+    <html:label for="zotero-prefpane-__addonRef__-openaiCompatibleKey"
+      >API key (optional, for remote endpoints)</html:label
+    >
+    <html:input
+      type="password"
+      id="zotero-prefpane-__addonRef__-openaiCompatibleKey"
+      preference="openaiCompatibleKey"
       style="width: 260px"
     ></html:input>
   </hbox>

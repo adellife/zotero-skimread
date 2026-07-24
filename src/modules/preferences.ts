@@ -77,9 +77,13 @@ export function onPrefsLoad(window: Window) {
     const refresh = () => {
       const p = sel.value;
       set("url-row", usesUrl.has(p));
+      set("compat-key-row", p === "openai-compatible");
       set("skim-model-row", usesLocalModels.has(p));
       set("tldr-model-row", usesLocalModels.has(p));
       set("num-ctx-row", usesNumCtx.has(p));
+      // Consent is required for any provider that can send text off-machine —
+      // the cloud APIs, the CLI logins, and a remote OpenAI-compatible server.
+      set("consent-row", isCloud.has(p) || p === "openai-compatible");
       set("cloud-settings", isCloud.has(p));
       set("openai-key-row", p === "openai-api");
       set("anthropic-key-row", p === "anthropic");

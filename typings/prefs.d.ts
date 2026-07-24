@@ -10,6 +10,7 @@ declare namespace _ZoteroTypes {
       "ollamaUrl": string;
       "apiType": string;
       "openaiApiKey": string;
+      "openaiCompatibleKey": string;
       "anthropicApiKey": string;
       "codexPath": string;
       "codexModel": string;

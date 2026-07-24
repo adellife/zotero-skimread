@@ -1,6 +1,7 @@
 pref("ollamaUrl", "http://localhost:11434");
 pref("apiType", "ollama");
 pref("openaiApiKey", "");
+pref("openaiCompatibleKey", "");
 pref("anthropicApiKey", "");
 pref("codexPath", "codex");
 pref("codexModel", "gpt-5.6-luna");
