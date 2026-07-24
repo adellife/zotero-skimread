@@ -52,6 +52,34 @@ export function isReaderAlive(reader: any): boolean {
   return !!reader && (Zotero.Reader._readers as any[]).includes(reader);
 }
 
+/**
+ * Jump the reader to a passage of text (used by the EPUB highlight list, where
+ * positioned overlays are not available). Best-effort via the reader's find.
+ */
+export function navigateToText(reader: any, text: string): void {
+  const query = text.replace(/\s+/g, " ").trim().slice(0, 80);
+  if (!query) return;
+  const findState = {
+    active: true,
+    query,
+    highlightAll: true,
+    caseSensitive: false,
+    entireWord: false,
+    result: null,
+  };
+  try {
+    const iv = reader?._internalReader;
+    if (typeof reader?.setFindState === "function") {
+      reader.setFindState(findState);
+    } else if (typeof iv?.setFindState === "function") {
+      iv.setFindState(findState);
+    }
+    iv?.findNext?.();
+  } catch {
+    // Navigation is a convenience; never throw from it.
+  }
+}
+
 function getHandle(reader: any): ReaderHandle | null {
   const iframeWin = reader?._internalReader?._primaryView?._iframeWindow;
   if (!iframeWin) return null;
@@ -315,6 +343,349 @@ export async function installOverlays(
         ) as any[]) {
           el.remove();
         }
+      } catch {
+        // iframe may already be gone
+      }
+    },
+  };
+}
+
+// ---- EPUB overlays ---------------------------------------------------------
+// The EPUB reader is a reflowable, lazily-rendered HTML document with no
+// viewport/rect layer, so PDF-style absolute overlays don't apply. Instead we
+// paint with the CSS Custom Highlight API (CSS.highlights + Highlight ranges):
+// fully non-destructive — it colors text without inserting any DOM nodes, so it
+// never touches the book, its annotations, or the library. Sentences are
+// located by whitespace-tolerant text search and repainted as sections render.
+
+const EPUB_STYLE_ID = "skimread-epub-style";
+
+function epubSlug(s: string): string {
+  return (
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "") || "x"
+  );
+}
+
+// Text-matching normalization. Rendered book text and the model's quoted
+// sentence routinely differ in ways that break a naive match: ligatures (ﬁ/ﬂ),
+// curly vs straight quotes, soft hyphens and the many dash variants, and any
+// amount of whitespace/line-wrapping. Normalize all of that away, per char, so
+// a match can still be mapped back to exact positions.
+// (Approach adapted from Drakonis96/nodus's highlighter, MIT.)
+function normChar(ch: string): string {
+  let s = String(ch)
+    .normalize("NFKC") // ﬁ → fi, ﬂ → fl, and other compatibility forms
+    .replace(/[‘’´`]/g, "'")
+    .replace(/[“”]/g, '"');
+  // Drop whitespace and every hyphen/dash variant (incl. soft hyphen U+00AD).
+  s = s.replace(/[\s­‐-―−⁃-]/g, "");
+  return s.toLowerCase();
+}
+
+function normalizeText(t: string): string {
+  let out = "";
+  for (const ch of String(t ?? "")) out += normChar(ch);
+  return out;
+}
+
+// Locate a normalized quote in a normalized haystack. Tries an exact match
+// first, then progressively shorter prefixes: long quotes drift near their end
+// (a stray footnote marker, an odd glyph), and matching the opening 40-85% is
+// far better than dropping the highlight entirely.
+const PREFIX_RATIOS = [0.85, 0.7, 0.55, 0.4];
+
+function findNormalizedIndex(
+  haystack: string,
+  q: string,
+): { at: number; len: number } | null {
+  if (!q || q.length < 8) return null;
+  const at = haystack.indexOf(q);
+  if (at >= 0) return { at, len: q.length };
+  for (const ratio of PREFIX_RATIOS) {
+    const len = Math.floor(q.length * ratio);
+    if (len < 12 || len >= q.length) continue;
+    const hit = haystack.indexOf(q.slice(0, len));
+    if (hit >= 0) return { at: hit, len };
+  }
+  return null;
+}
+
+interface EpubHandle {
+  pv: any;
+  doc: any; // xray-waived iframe document
+  win: any; // xray-waived iframe window
+}
+
+function getEpubHandle(reader: any): EpubHandle | null {
+  const pv = reader?._internalReader?._primaryView;
+  const rawDoc = pv?._iframeDocument;
+  const rawWin = pv?._iframeWindow;
+  if (!rawDoc || !rawWin) return null;
+  const win = Cu.waiveXrays(rawWin);
+  const doc = Cu.waiveXrays(rawDoc);
+  if (typeof win.Highlight !== "function" || !win.CSS?.highlights) return null;
+  return { pv, doc, win };
+}
+
+/** Whether EPUB overlays can be painted for this reader/runtime. */
+export function canPaintEpub(reader: any): boolean {
+  return !!getEpubHandle(reader);
+}
+
+const EPUB_FLAG_LAYER_ID = "skimread-flag-layer";
+
+export async function installEpubOverlays(
+  reader: any,
+  specs: HighlightSpec[],
+  opacityPct: number,
+  showFlags = true,
+): Promise<OverlayController | null> {
+  const h = getEpubHandle(reader);
+  if (!h) return null;
+  const { pv, doc, win } = h;
+
+  // Group each label's sentence queries under its color; one Highlight per label.
+  // Keep a flat list too, so flags can be placed per individual sentence.
+  const byLabel = new Map<string, { color: string; queries: string[] }>();
+  const flagSpecs: Array<{ query: string; color: string; label: string }> = [];
+  for (const s of specs) {
+    const key = epubSlug(s.label || "highlight");
+    if (!byLabel.has(key)) byLabel.set(key, { color: s.colorRGB, queries: [] });
+    const q = normalizeText(s.text);
+    if (q) {
+      byLabel.get(key)!.queries.push(q);
+      flagSpecs.push({ query: q, color: s.colorRGB, label: s.label || "" });
+    }
+  }
+
+  const styleFor = () =>
+    Array.from(byLabel.entries())
+      .map(
+        ([k, v]) =>
+          `::highlight(skimread-${k}){background-color:rgba(${v.color}, ${
+            opacityPct / 100
+          });border-radius:2px;}`,
+      )
+      .join("");
+
+  let style = doc.getElementById(EPUB_STYLE_ID);
+  if (!style) {
+    style = doc.createElement("style");
+    style.id = EPUB_STYLE_ID;
+    doc.head.appendChild(style);
+  }
+  style.textContent = styleFor();
+
+  // Concatenate all currently-rendered text into a normalized string with a
+  // per-character map back to (textNode, offset). Nodes inside <template>
+  // (unrendered sections) have no client rects and are skipped. A single source
+  // glyph can expand to several normalized chars (ligatures), so each expanded
+  // position maps back to the same source offset — a matched range still covers
+  // the whole glyph.
+  const buildIndex = (): { s: string; map: Array<[any, number]> } => {
+    const walker = doc.createTreeWalker(doc.body, 4 /* SHOW_TEXT */);
+    let s = "";
+    const map: Array<[any, number]> = [];
+    let node: any;
+    while ((node = walker.nextNode())) {
+      const p = node.parentElement;
+      if (!p || !p.getClientRects || p.getClientRects().length === 0) continue;
+      const t: string = node.textContent || "";
+      for (let i = 0; i < t.length; i++) {
+        const ns = normChar(t[i]);
+        for (let k = 0; k < ns.length; k++) {
+          s += ns[k];
+          map.push([node, i]);
+        }
+      }
+    }
+    return { s, map };
+  };
+
+  // Locate one query's first rendered occurrence and return its DOM range.
+  const rangeForQuery = (
+    q: string,
+    s: string,
+    map: Array<[any, number]>,
+  ): any | null => {
+    const hit = findNormalizedIndex(s, q);
+    if (!hit) return null; // section not rendered yet, or text differs
+    const a = map[hit.at];
+    const b = map[hit.at + hit.len - 1];
+    if (!a || !b) return null;
+    try {
+      const range = doc.createRange();
+      range.setStart(a[0], a[1]);
+      range.setEnd(b[0], b[1] + 1);
+      return range;
+    } catch {
+      return null; // node detached between index build and range creation
+    }
+  };
+
+  // Flags are positioned overlay chips in a fixed layer, hugging the left edge
+  // of each highlighted sentence — the EPUB analogue of the PDF margin flags.
+  // The layer holds no book content; it is removed wholesale on clear().
+  const ensureFlagLayer = (): any => {
+    let layer = doc.getElementById(EPUB_FLAG_LAYER_ID);
+    if (!layer) {
+      layer = doc.createElement("div");
+      layer.id = EPUB_FLAG_LAYER_ID;
+      layer.setAttribute(
+        "style",
+        "position:fixed;inset:0;z-index:2147483646;pointer-events:none;",
+      );
+      doc.body.appendChild(layer);
+    }
+    return layer;
+  };
+
+  // Place a flag per visible highlighted sentence, de-duplicating chips that
+  // would stack on the same line. Ranges track the text automatically, so this
+  // just re-reads their current viewport rects (cheap on page turns).
+  const positionFlags = (rangesWithLabel: any[]) => {
+    if (!showFlags) return;
+    const layer = ensureFlagLayer();
+    while (layer.firstChild) layer.removeChild(layer.firstChild);
+    const H = win.innerHeight;
+    const W = win.innerWidth;
+    const usedTops: number[] = [];
+    for (const rl of rangesWithLabel) {
+      const rc = rl.range.getClientRects()[0];
+      if (!rc || rc.width === 0) continue;
+      // Only the current column/viewport; paginated columns lay text out well
+      // outside the visible strip.
+      if (rc.top < 0 || rc.top > H - 6 || rc.left < 0 || rc.left > W) continue;
+      if (usedTops.some((t) => Math.abs(t - rc.top) < 12)) continue;
+      usedTops.push(rc.top);
+      const name = rl.label
+        ? rl.label.charAt(0).toUpperCase() + rl.label.slice(1)
+        : "";
+      const flag = doc.createElement("div");
+      flag.textContent = name;
+      // Anchor the chip's right edge just left of the text; fall back to the far
+      // left margin when the text starts too close to the edge.
+      const anchor =
+        rc.left > 60
+          ? `left:auto;right:${Math.round(W - rc.left + 4)}px;`
+          : `left:2px;`;
+      flag.setAttribute(
+        "style",
+        "position:fixed;" +
+          anchor +
+          `top:${Math.round(rc.top)}px;` +
+          "font:600 9px sans-serif;padding:1px 5px 1px 4px;" +
+          "background:#fff;color:#2e414f;border-radius:2px 0 0 2px;" +
+          `border-right:3px solid rgb(${rl.color});` +
+          "box-shadow:0 0 2px rgba(0,0,0,0.35);white-space:nowrap;",
+      );
+      layer.appendChild(flag);
+    }
+  };
+
+  // Ranges kept between paints so page-turn reflows can reposition flags
+  // without re-searching the text.
+  let flagRanges: any[] = [];
+
+  const repaintAll = async () => {
+    const { s, map } = buildIndex();
+    // Highlights: one CSS Highlight per label.
+    for (const [k, v] of byLabel) {
+      const ranges: any[] = [];
+      for (const q of v.queries) {
+        const range = rangeForQuery(q, s, map);
+        if (range) ranges.push(range);
+      }
+      const name = `skimread-${k}`;
+      if (ranges.length) {
+        win.CSS.highlights.set(name, new win.Highlight(...ranges));
+      } else {
+        win.CSS.highlights.delete(name);
+      }
+    }
+    // Flags: one chip per sentence.
+    flagRanges = [];
+    for (const fs of flagSpecs) {
+      const range = rangeForQuery(fs.query, s, map);
+      if (range) flagRanges.push({ range, color: fs.color, label: fs.label });
+    }
+    positionFlags(flagRanges);
+  };
+
+  await repaintAll();
+
+  // Repaint as lazily-rendered sections mount / the book reflows (debounced).
+  let timer = 0;
+  const schedule = Cu.exportFunction(() => {
+    if (timer) return;
+    timer = win.setTimeout(() => {
+      timer = 0;
+      repaintAll().catch(() => {});
+    }, 150);
+  }, win);
+  const observer = new win.MutationObserver(schedule);
+  try {
+    observer.observe(
+      pv._sectionsContainer || doc.body,
+      Cu.cloneInto({ childList: true, subtree: true }, win),
+    );
+  } catch {
+    // observer is a convenience; painting still works for rendered sections
+  }
+
+  // Reposition flags on page/column turns. The EPUB view calls
+  // onChangeViewStats as the paginated columns shift; wrap it (and restore the
+  // original on clear) so chips follow their sentences.
+  const opts = pv._options;
+  const origStats = opts?.onChangeViewStats;
+  let flagTimer = 0;
+  if (showFlags && opts) {
+    opts.onChangeViewStats = Cu.exportFunction(function (
+      this: any,
+      ...args: any[]
+    ) {
+      if (!flagTimer) {
+        flagTimer = win.setTimeout(() => {
+          flagTimer = 0;
+          try {
+            positionFlags(flagRanges);
+          } catch {
+            // ignore transient reflow errors
+          }
+        }, 30);
+      }
+      if (typeof origStats === "function") return origStats.apply(this, args);
+    }, win);
+  }
+
+  return {
+    repaintAll,
+    clear: () => {
+      try {
+        observer.disconnect();
+      } catch {
+        // reader may already be gone
+      }
+      try {
+        if (timer) win.clearTimeout(timer);
+        if (flagTimer) win.clearTimeout(flagTimer);
+      } catch {
+        // ignore
+      }
+      try {
+        if (opts && opts.onChangeViewStats !== origStats)
+          opts.onChangeViewStats = origStats;
+      } catch {
+        // ignore
+      }
+      try {
+        for (const k of byLabel.keys())
+          win.CSS.highlights.delete(`skimread-${k}`);
+        doc.getElementById(EPUB_STYLE_ID)?.remove();
+        doc.getElementById(EPUB_FLAG_LAYER_ID)?.remove();
       } catch {
         // iframe may already be gone
       }
