@@ -8,12 +8,19 @@ import { config } from "../../package.json";
 import { getLocaleID, getString } from "../utils/locale";
 import { getPref, setPref } from "../utils/prefs";
 import { checkStatus, missingModels } from "../llm/ollama";
-import { getReaderForTab } from "../reader/adapter";
+import {
+  getReaderForTab,
+  navigateToText,
+  HighlightSpec,
+} from "../reader/adapter";
 import {
   cacheState,
   cacheSummary,
+  cancelSkim,
   clearHighlights,
+  discardSkim,
   generateTldr,
+  getCachedHighlights,
   getCachedLabels,
   getCachedTldr,
   getConfiguredLabels,
@@ -59,6 +66,7 @@ export function registerReaderSection() {
       await renderLabelRows(body, null);
       await refreshRunSummary(body);
       await restoreTldr(body);
+      await restoreHighlightList(body);
     },
   });
 }
@@ -213,16 +221,43 @@ function renderPanel(body: HTMLElement) {
   wrap.append(progress);
 
   genBtn.addEventListener("click", () => onGenerate(body));
+  // Shared Pause/Resume slot: pauses a live run, or continues a paused one.
   cancelBtn.addEventListener("click", () => {
     const { tabID } = currentContext(body);
-    if (tabID) clearHighlights(tabID); // sets cancelled; partial cache survives
-    setProgress(body, getString("progress-cancelling"));
+    if (!tabID) return;
+    if (isRunning(tabID)) {
+      // Pause only: highlights painted so far stay on screen (Clear removes them).
+      cancelSkim(tabID);
+      // Cancellation is cooperative: the in-flight request still has to finish,
+      // which can take a while on a big model. Show that immediately instead of
+      // leaving a "Pause" button that appears to do nothing.
+      cancelBtn.textContent = getString("btn-pausing");
+      (cancelBtn as HTMLButtonElement).disabled = true;
+      setProgress(body, getString("progress-cancelling"));
+    } else {
+      void onGenerate(body, true); // resume from the partial cache
+    }
   });
+  // Contextual: cancels and discards an in-progress/paused run, otherwise just
+  // removes the overlays of a finished run (whose results are worth keeping).
   clearBtn.addEventListener("click", () => {
-    const { tabID } = currentContext(body);
-    if (tabID) clearHighlights(tabID);
-    setProgress(body, getString("progress-cleared"));
-    void refreshButtons(body);
+    void (async () => {
+      const { tabID, attachment } = currentContext(body);
+      if (!tabID) return;
+      const abandonable =
+        attachment &&
+        (isRunning(tabID) || (await cacheState(attachment)) === "partial");
+      if (abandonable) {
+        await discardSkim(tabID, attachment);
+        setProgress(body, getString("progress-run-cancelled"));
+      } else {
+        clearHighlights(tabID);
+        setProgress(body, getString("progress-cleared"));
+      }
+      renderHighlightList(body, []);
+      await refreshButtons(body);
+      await refreshRunSummary(body);
+    })();
   });
   saveBtn.addEventListener("click", () => {
     void onSaveAnnotations(body);
@@ -267,7 +302,57 @@ function renderPanel(body: HTMLElement) {
     ),
   );
 
+  // EPUB highlight list (populated on async render / after a run).
+  const hlList = doc.createElement("div");
+  hlList.id = "skimread-hl-list";
+  hlList.style.cssText =
+    "display:flex;flex-direction:column;gap:4px;margin-top:6px;";
+  wrap.append(hlList);
+
   body.append(wrap);
+}
+
+function isEpubContext(body: HTMLElement): boolean {
+  return currentContext(body).reader?.type === "epub";
+}
+
+/** Repopulate the EPUB highlight list from cache when the pane re-renders. */
+async function restoreHighlightList(body: HTMLElement) {
+  if (!isEpubContext(body)) return;
+  const { attachment } = currentContext(body);
+  if (!attachment) return;
+  renderHighlightList(body, await getCachedHighlights(attachment));
+}
+
+/** EPUB: render selected highlights as a clickable, jump-to list. */
+function renderHighlightList(body: HTMLElement, specs: HighlightSpec[]) {
+  const box = body.querySelector("#skimread-hl-list") as HTMLElement | null;
+  if (!box) return;
+  const doc = body.ownerDocument!;
+  box.replaceChildren();
+  if (!specs.length) return;
+  const { reader } = currentContext(body);
+  const ordered = [...specs].sort(
+    (a, b) => a.pageIndex - b.pageIndex || a.startChar - b.startChar,
+  );
+  for (const spec of ordered) {
+    const row = doc.createElement("div");
+    row.style.cssText =
+      "display:flex;gap:6px;font-size:12px;line-height:1.35;cursor:pointer;" +
+      "padding:4px 6px;border-radius:4px;border-left:3px solid rgb(" +
+      spec.colorRGB +
+      ");background:rgba(127,127,127,0.06);";
+    const dot = doc.createElement("span");
+    dot.style.cssText = `flex:0 0 auto;width:9px;height:9px;margin-top:3px;border-radius:2px;background:rgba(${spec.colorRGB},0.85);`;
+    const txt = doc.createElement("span");
+    txt.textContent =
+      spec.text.length > 160 ? spec.text.slice(0, 158) + "…" : spec.text;
+    row.append(dot, txt);
+    row.addEventListener("click", () => {
+      if (reader) navigateToText(reader, spec.text);
+    });
+    box.append(row);
+  }
 }
 
 /**
@@ -345,10 +430,16 @@ function callbacks(body: HTMLElement) {
       ) as HTMLButtonElement | null;
       if (btn) btn.textContent = getString("btn-tldr-refresh");
     },
+    onHighlights: (specs: HighlightSpec[]) => renderHighlightList(body, specs),
   };
 }
 
-async function onGenerate(body: HTMLElement) {
+/**
+ * Start a run. `resume` continues a paused run from its partial cache; without
+ * it, an existing run (partial or complete) is reset and regenerated, matching
+ * what the Generate button says in each state.
+ */
+async function onGenerate(body: HTMLElement, resume = false) {
   const { tabID, reader, attachment } = currentContext(body);
   if (!tabID || !reader || !attachment) {
     setProgress(body, getString("progress-no-reader"));
@@ -361,16 +452,17 @@ async function onGenerate(body: HTMLElement) {
   const genBtn = body.querySelector(
     "#skimread-generate",
   ) as HTMLButtonElement | null;
-  const cancelBtn = body.querySelector(
-    "#skimread-cancel",
-  ) as HTMLElement | null;
-  // resume partial runs instead of wiping them; full regenerate only when complete
-  const regenerate = (await cacheState(attachment)) === "complete";
+  const runCtrl = body.querySelector("#skimread-cancel") as HTMLElement | null;
+  const regenerate = resume ? false : (await cacheState(attachment)) !== "none";
   if (genBtn) genBtn.disabled = true;
-  if (cancelBtn) cancelBtn.style.display = "";
+  // The shared slot shows Pause for the duration of the run.
+  if (runCtrl) {
+    runCtrl.textContent = getString("btn-cancel");
+    runCtrl.style.display = "";
+  }
   await runSkim(reader, tabID, attachment, callbacks(body), regenerate);
   if (genBtn) genBtn.disabled = false;
-  if (cancelBtn) cancelBtn.style.display = "none";
+  // refreshButtons decides whether the slot becomes Resume or hides.
   await refreshButtons(body);
   await refreshRunSummary(body);
 }
@@ -520,20 +612,50 @@ function repaintFromCacheIfAny(body: HTMLElement) {
   });
 }
 
-/** Switch Generate label to "Reset & regenerate" when a cached run exists. */
+/**
+ * Reflect run state in the buttons:
+ * - Generate: "Generate highlights" when nothing is cached, else "Reset & regenerate".
+ * - Shared slot: "Pause" while running, "Resume" when a paused run exists, else hidden.
+ * Pause and Resume deliberately occupy the same slot, so a run is stopped and
+ * continued from the same place.
+ */
 async function refreshButtons(body: HTMLElement) {
-  const { attachment } = currentContext(body);
+  const { tabID, attachment } = currentContext(body);
   const genBtn = body.querySelector(
     "#skimread-generate",
   ) as HTMLButtonElement | null;
   if (!genBtn || !attachment) return;
   const state = await cacheState(attachment);
   genBtn.textContent =
-    state === "complete"
-      ? getString("btn-regenerate")
-      : state === "partial"
-        ? getString("btn-resume")
-        : getString("btn-generate");
+    state === "none" ? getString("btn-generate") : getString("btn-regenerate");
+
+  const running = tabID ? isRunning(tabID) : false;
+  // Clear doubles as the "abandon this run" action while one is live/paused.
+  const clearBtn = body.querySelector(
+    "#skimread-clear",
+  ) as HTMLButtonElement | null;
+  if (clearBtn) {
+    clearBtn.textContent =
+      running || state === "partial"
+        ? getString("btn-cancel-run")
+        : getString("btn-clear");
+  }
+
+  const runCtrl = body.querySelector(
+    "#skimread-cancel",
+  ) as HTMLButtonElement | null;
+  if (runCtrl) {
+    runCtrl.disabled = false; // clears the transient "Pausing…" state
+    if (running) {
+      runCtrl.textContent = getString("btn-cancel");
+      runCtrl.style.display = "";
+    } else if (state === "partial") {
+      runCtrl.textContent = getString("btn-resume");
+      runCtrl.style.display = "";
+    } else {
+      runCtrl.style.display = "none";
+    }
+  }
   const saveBtn = body.querySelector(
     "#skimread-save-annotations",
   ) as HTMLButtonElement | null;

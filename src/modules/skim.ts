@@ -28,12 +28,17 @@ import {
   DEFAULT_LABELS,
   DISCOVER_SCHEMA,
   DISCOVER_SYSTEM,
+  PALETTE,
+  ADAPTIVE_SCHEMA,
+  ADAPTIVE_SYSTEM,
+  buildAdaptiveSelectionPrompt,
   buildBandSelectionPrompt,
   buildDocumentSelectionPrompt,
   buildDocumentSelectionSchema,
   buildSkimSystem,
   buildTldrPrompt,
   parseCustomLabels,
+  validateAdaptiveSelection,
   validateDiscovery,
   validateDocumentSelection,
   validateTldr,
@@ -44,12 +49,70 @@ import {
   extractPage,
   getPageCount,
   installOverlays,
+  installEpubOverlays,
   isReaderAlive,
   HighlightSpec,
   OverlayController,
   PageText,
 } from "../reader/adapter";
+import { extractEpubSections } from "../reader/epub";
 import { saveNativeHighlights } from "./annotations";
+
+/** Reader document type. EPUBs use a text-only (no-overlay) path. */
+function isEpub(reader: any): boolean {
+  return reader?.type === "epub";
+}
+
+// Zotero Item Types whose contents span shifting topics chapter to chapter and
+// therefore benefit from adaptive per-chapter label discovery. Everything else
+// (journalArticle, conferencePaper, preprint, …) is treated as a focused paper.
+const BOOK_LIKE_TYPES = new Set([
+  "book",
+  "bookSection",
+  "thesis",
+  "report",
+  "manuscript",
+  "encyclopediaArticle",
+  "dictionaryEntry",
+]);
+
+/** True when the attachment's (parent) Zotero Item Type reads as book-like. */
+function isBookLikeItem(attachment: Zotero.Item): boolean {
+  try {
+    const parent = attachment.parentItem ?? attachment;
+    const typeName = Zotero.ItemTypes.getName(parent.itemTypeID);
+    return BOOK_LIKE_TYPES.has(typeName);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Rebuild coarse per-page text from cached sentences, for the paths that only
+ * need page *text* (label discovery). Used when extraction was reused from
+ * cache and the full char geometry was never re-read.
+ */
+function sentencesAsPages(sentences: ExtractedSentence[]): PageText[] {
+  const byPage = new Map<number, string[]>();
+  for (const s of sentences) {
+    if (!byPage.has(s.pageIndex)) byPage.set(s.pageIndex, []);
+    byPage.get(s.pageIndex)!.push(s.text);
+  }
+  return [...byPage.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([pageIndex, parts]) => ({
+      pageIndex,
+      text: parts.join(" "),
+      charMap: [],
+      chars: [],
+    }));
+}
+
+/** Wrap plain section text as a PageText with identity char offsets. */
+function sectionAsPage(index: number, text: string): PageText {
+  const charMap = Array.from({ length: text.length }, (_, i) => i);
+  return { pageIndex: index, text, charMap, chars: [] };
+}
 
 export interface ClassifiedSentence {
   pageIndex: number;
@@ -80,6 +143,13 @@ interface CachePayload {
   /** Cumulative tokens spent producing this run (input/read and output). */
   tokensInput?: number;
   tokensOutput?: number;
+  /**
+   * Extracted + section-processed sentences. Persisted so a paused run resumes
+   * straight into selection instead of re-reading the whole document — the slow
+   * part of a long PDF, and pure wasted time on resume.
+   */
+  extracted?: ExtractedSentence[];
+  extractComplete?: boolean;
 }
 
 interface JobState {
@@ -270,6 +340,16 @@ export async function getCachedLabels(
   attachment: Zotero.Item,
 ): Promise<LabelDef[] | null> {
   return (await cacheRead(await cacheKey(attachment)))?.labels ?? null;
+}
+
+/** Selected highlights (density- and label-filtered) for the EPUB sidebar list. */
+export async function getCachedHighlights(
+  attachment: Zotero.Item,
+): Promise<HighlightSpec[]> {
+  const payload = await cacheRead(await cacheKey(attachment));
+  if (!payload?.complete) return [];
+  const density = Number(getPref("highlightDensity")) || 3;
+  return selectTopPerPage(payload.sentences, payload.labels, density);
 }
 
 /** Whether this exact cached skim run has already been saved to Zotero. */
@@ -617,6 +697,87 @@ async function selectDocument(
   );
 }
 
+// ---------- adaptive (evolving) label selection ----------
+
+const MAX_AUTO_LABELS = 8;
+
+function slugLabel(raw: string): string {
+  return (
+    raw
+      .toLowerCase()
+      .replace(/[^a-z]/g, "")
+      .slice(0, 12) || "topic"
+  );
+}
+
+/**
+ * Resolve a model-proposed label to a stable key, growing the shared label set
+ * up to a cap. Near-duplicates and overflow map onto the closest existing label.
+ */
+function reconcileLabel(labels: LabelDef[], raw: string): string {
+  const key = slugLabel(raw);
+  const lower = raw.trim().toLowerCase();
+  const existing = labels.find(
+    (l) => l.key === key || l.name.toLowerCase() === lower,
+  );
+  if (existing) return existing.key;
+  if (labels.length < MAX_AUTO_LABELS) {
+    const name = raw
+      .trim()
+      .slice(0, 24)
+      .replace(/^./, (c) => c.toUpperCase());
+    labels.push({
+      key,
+      name,
+      color: PALETTE[labels.length % PALETTE.length],
+      description: name,
+    });
+    return key;
+  }
+  // Cap reached: fold into the closest existing label, else the first.
+  const near = labels.find((l) => key.includes(l.key) || l.key.includes(key));
+  return (near || labels[0]).key;
+}
+
+/**
+ * Select + label one passage, allowing the model to reuse the evolving label
+ * set or introduce a new label. Mutates `labels` in place as labels emerge.
+ */
+async function selectBandAdaptive(
+  labels: LabelDef[],
+  band: ExtractedSentence[],
+  targetCount: number,
+  isCancelled: () => boolean,
+): Promise<ClassifiedSentence[]> {
+  const model = modelForProvider(String(getPref("skimModel")));
+  const user = buildAdaptiveSelectionPrompt(
+    band.map((sentence, id) => ({ id, text: sentence.text })),
+    targetCount,
+    labels,
+  );
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (isCancelled()) return [];
+    try {
+      const raw = await chatJSON({
+        model,
+        system: ADAPTIVE_SYSTEM,
+        user: (attempt ? "Return only valid JSON.\n\n" : "") + user,
+        schema: ADAPTIVE_SCHEMA,
+      });
+      const selected = validateAdaptiveSelection(raw, band.length);
+      if (!selected) continue;
+      return selected.map((result) => ({
+        ...band[result.id],
+        label: reconcileLabel(labels, result.label),
+        confidence: result.importance,
+      }));
+    } catch (error) {
+      ztoolkit.log("skimread adaptive selection error", error);
+    }
+  }
+  return [];
+}
+
 // ---------- hierarchical (map-reduce) selection ----------
 
 /**
@@ -806,9 +967,18 @@ async function summarizeText(
 /** Collect the leading text of a paper, reusing already-extracted pages. */
 function leadingText(
   reader: any,
+  attachment: Zotero.Item,
   cachedPages?: Map<number, PageText>,
 ): Promise<string> {
   return (async () => {
+    if (isEpub(reader)) {
+      const sections = await extractEpubSections(attachment);
+      return sections
+        .map((s) => s.text)
+        .join("\n")
+        .slice(0, TLDR_INPUT_CHARS)
+        .trim();
+    }
     let text = "";
     const pageCount = getPageCount(reader);
     for (let p = 0; p < pageCount && text.length < TLDR_INPUT_CHARS; p++) {
@@ -856,7 +1026,7 @@ export async function generateTldr(
   if (!force && existing?.tldr) return existing.tldr;
 
   onStatus("Reading document…");
-  const text = await leadingText(reader);
+  const text = await leadingText(reader, attachment);
   if (!text) throw new Error("No extractable text (scanned PDF?)");
   const title = String(attachment.getField("title") || "").trim();
   const model = modelForProvider(
@@ -902,6 +1072,34 @@ export function isRunning(tabID: string): boolean {
   return !!jobs.get(tabID)?.running;
 }
 
+/**
+ * Stop an in-flight run but KEEP whatever has already been painted. Long books
+ * are the whole point of stopping early, so the partial highlights (and the
+ * partial cache behind them) must survive; Generate later resumes from there.
+ */
+export function cancelSkim(tabID: string): void {
+  const job = jobs.get(tabID);
+  if (job) job.cancelled = true;
+}
+
+/**
+ * Abandon a run outright: stop it, remove its overlays, and discard the cached
+ * progress so the document goes back to a clean, never-run state. This is the
+ * counterpart to Pause — it throws the work away on purpose.
+ * Never touches user annotations, the library, or the file.
+ */
+export async function discardSkim(
+  tabID: string,
+  attachment: Zotero.Item,
+): Promise<void> {
+  clearHighlights(tabID);
+  try {
+    await cacheDelete(await cacheKey(attachment));
+  } catch {
+    // nothing cached for this document
+  }
+}
+
 /** Remove overlays for a tab immediately (never touches user annotations). */
 export function clearHighlights(tabID: string): void {
   const job = jobs.get(tabID);
@@ -919,6 +1117,8 @@ export interface RunCallbacks {
   onCounts?: (counts: Record<string, number>) => void;
   onLabels?: (labels: LabelDef[]) => void;
   onTldr?: (tldr: string) => void;
+  /** EPUB: the selected highlights to render as a clickable list. */
+  onHighlights?: (specs: HighlightSpec[]) => void;
 }
 
 /**
@@ -942,12 +1142,29 @@ export async function runSkim(
   };
   jobs.set(tabID, job);
 
-  const paint = async (payload: CachePayload) => {
-    if (!isReaderAlive(reader) || job.cancelled) return 0;
+  // `force` paints even after cancellation, so stopping a long run leaves the
+  // work done so far on screen instead of wiping it.
+  const paint = async (payload: CachePayload, force = false) => {
+    if (!isReaderAlive(reader) || (job.cancelled && !force)) return 0;
     const density = Number(getPref("highlightDensity")) || 3;
-    const opacity = Number(getPref("highlightOpacity")) || 25;
-    const showFlags = getPref("showFlags") !== false;
     const specs = selectTopPerPage(payload.sentences, payload.labels, density);
+    cb.onCounts?.(countByLabel(payload.sentences));
+    const opacity = Number(getPref("highlightOpacity")) || 25;
+    // EPUB: reflowable, lazily-rendered HTML — paint with the CSS Custom
+    // Highlight API (non-destructive, no DOM nodes) and also surface the picks
+    // as a clickable list in the sidebar for navigation.
+    const showFlags = getPref("showFlags") !== false;
+    if (isEpub(reader)) {
+      cb.onHighlights?.(specs);
+      job.overlay?.clear();
+      job.overlay = await installEpubOverlays(
+        reader,
+        specs,
+        opacity,
+        showFlags,
+      );
+      return specs.length;
+    }
     job.overlay?.clear();
     job.overlay = await installOverlays(
       reader,
@@ -956,7 +1173,6 @@ export async function runSkim(
       job.pageCache,
       showFlags,
     );
-    cb.onCounts?.(countByLabel(payload.sentences));
     return specs.length;
   };
 
@@ -974,52 +1190,126 @@ export async function runSkim(
     // Count tokens spent from here on; added to the cached totals at the end.
     resetTokenUsage();
 
-    // ---- extract (needed both for fresh runs and to resume partial ones) ----
-    cb.onStatus("Extracting text…");
-    const pageCount = getPageCount(reader);
-    const pages: PageText[] = [];
-    let sentences: ExtractedSentence[] = [];
-    for (let p = 0; p < pageCount; p++) {
-      if (job.cancelled) return;
-      const page = await extractPage(reader, p);
-      if (!page) continue;
-      pages.push(page);
-      job.pageCache.set(p, page);
-      for (const sent of segmentSentences(page)) {
-        sentences.push({ pageIndex: p, section: "body", ...sent });
-      }
-    }
-    if (!sentences.length) {
-      cb.onError("No extractable text (scanned PDF?)");
-      return;
-    }
-    sentences = limitWork(withDocumentSections(pages, sentences));
-
-    // ---- labels ----
-    let labels: LabelDef[];
-    if (payload) {
-      labels = payload.labels; // resuming: keep the labels of the partial run
-    } else {
-      let configured = getConfiguredLabels();
-      if (!configured) {
-        configured = await discoverLabels(pages, cb.onStatus);
-        if (!configured) {
-          cb.onError("Label discovery failed — using defaults");
-          configured = DEFAULT_LABELS;
-        }
-      }
-      labels = configured;
+    // A run must be resumable from the moment it starts, so pausing at ANY
+    // point leaves a record for Resume to pick up. `resuming` is captured here
+    // because the payload below is created eagerly rather than after labels.
+    const resuming = !!payload;
+    if (!payload) {
       payload = {
         promptVersion: PROMPT_VERSION,
         model: modelForProvider(String(getPref("skimModel"))),
-        labels,
+        labels: [],
         sentences: [],
         complete: false,
         classifiedCount: 0,
       };
     }
-    if (job.cancelled) return;
-    cb.onLabels?.(labels);
+
+    /**
+     * Pause during extraction / label discovery, i.e. before this run has
+     * selected anything. Returning silently here used to leave the sidebar
+     * stuck on "Pausing…" with no Resume — most visible on PDFs, which spend
+     * real time extracting page by page. Persist progress (including any
+     * completed extraction), repaint earlier highlights, and always report.
+     */
+    const pausedBeforeSelection = async () => {
+      const usage = getTokenUsage();
+      payload!.tokensInput = (payload!.tokensInput || 0) + usage.input;
+      payload!.tokensOutput = (payload!.tokensOutput || 0) + usage.output;
+      await cacheWrite(key, payload!);
+      const kept = payload!.sentences.length ? await paint(payload!, true) : 0;
+      cb.onError(
+        kept
+          ? `Paused — ${kept} highlights kept, Resume to continue`
+          : "Paused — Resume to continue",
+      );
+    };
+
+    // ---- extract (needed both for fresh runs and to resume partial ones) ----
+    const pages: PageText[] = [];
+    let sentences: ExtractedSentence[] = [];
+    if (payload.extractComplete && payload.extracted?.length) {
+      // Already read this document in an earlier (paused) run — skip straight
+      // to selection. Page geometry is re-read lazily by the overlay painter.
+      sentences = payload.extracted;
+      cb.onStatus(`Resuming — ${sentences.length} sentences already read`);
+    } else if (isEpub(reader)) {
+      cb.onStatus("Reading EPUB…");
+      const sections = await extractEpubSections(attachment);
+      for (const s of sections) {
+        if (job.cancelled) return await pausedBeforeSelection();
+        const page = sectionAsPage(s.index, s.text);
+        pages.push(page);
+        job.pageCache.set(s.index, page);
+        for (const sent of segmentSentences(page)) {
+          sentences.push({ pageIndex: s.index, section: "body", ...sent });
+        }
+      }
+    } else {
+      cb.onStatus("Extracting text…");
+      const pageCount = getPageCount(reader);
+      for (let p = 0; p < pageCount; p++) {
+        if (job.cancelled) return await pausedBeforeSelection();
+        const page = await extractPage(reader, p);
+        if (!page) continue;
+        pages.push(page);
+        job.pageCache.set(p, page);
+        for (const sent of segmentSentences(page)) {
+          sentences.push({ pageIndex: p, section: "body", ...sent });
+        }
+      }
+    }
+    if (!sentences.length) {
+      cb.onError(
+        isEpub(reader)
+          ? "No extractable text in this EPUB"
+          : "No extractable text (scanned PDF?)",
+      );
+      return;
+    }
+    // EPUBs already have chapter sections; PDFs infer sections from headings.
+    // Skipped when the sentences came back from cache already processed.
+    if (!payload.extractComplete) {
+      sentences = isEpub(reader)
+        ? sentences
+        : limitWork(withDocumentSections(pages, sentences));
+      // Persist immediately: reading the document is the slow, token-free part,
+      // and no later pause should ever make the user pay for it twice.
+      payload.extracted = sentences;
+      payload.extractComplete = true;
+      await cacheWrite(key, payload);
+    }
+
+    // ---- labels ----
+    // Auto mode routes by document shape. A book/EPUB — or any book-like Zotero
+    // Item Type — spans shifting topics, so labels evolve chapter by chapter
+    // (adaptive). A focused paper is well served by one upfront discovery pass,
+    // which held up better on papers. Page count is a fallback for untyped or
+    // standalone attachments with no informative parent item.
+    const isAuto = getLabelMode() === "auto";
+    // When extraction was reused from cache there is no live `pages` array, so
+    // fall back to what the cached sentences imply.
+    const docPageCount =
+      pages.length ||
+      sentences.reduce((max, s) => Math.max(max, s.pageIndex), 0) + 1;
+    const adaptiveAuto =
+      isAuto &&
+      (isEpub(reader) || isBookLikeItem(attachment) || docPageCount > 40);
+    let labels: LabelDef[];
+    if (resuming && payload.labels.length) {
+      labels = payload.labels; // resuming: keep the labels of the partial run
+    } else if (adaptiveAuto) {
+      labels = []; // grows per chapter during selection
+    } else if (isAuto) {
+      const labelPages = pages.length ? pages : sentencesAsPages(sentences);
+      labels =
+        (await discoverLabels(labelPages, cb.onStatus)) ?? DEFAULT_LABELS;
+    } else {
+      labels = getConfiguredLabels() ?? DEFAULT_LABELS;
+    }
+    payload.labels = labels;
+    if (job.cancelled) return await pausedBeforeSelection();
+    if (!adaptiveAuto) cb.onLabels?.(labels);
 
     // ---- document selection ----
     // "balanced": hierarchical map-reduce — split into contiguous bands and
@@ -1034,9 +1324,11 @@ export async function runSkim(
     const pageSpan =
       sentences.reduce((max, s) => Math.max(max, s.pageIndex), 0) + 1;
     payload.pageSpan = pageSpan;
+    // Adaptive auto must run per band so labels can evolve section by section.
+    const useBands = balanced || adaptiveAuto;
     let units: ExtractedSentence[][];
     let perUnitTarget = 0;
-    if (balanced) {
+    if (useBands) {
       // ~1 band per 1.8 pages, but never so many that a band has too few
       // sentences to choose from (≥ ~6 candidates each).
       const bandCount = Math.max(
@@ -1077,10 +1369,16 @@ export async function runSkim(
           ? `Selecting from all ${sentences.length} sentences…`
           : `Selecting highlights — part ${index + 1} of ${units.length}…`,
       );
-      const selected = balanced
-        ? await selectBand(labels, unit, perUnitTarget, isCancelled)
-        : await selectDocument(labels, unit, isCancelled);
+      const selected = adaptiveAuto
+        ? await selectBandAdaptive(labels, unit, perUnitTarget, isCancelled)
+        : useBands
+          ? await selectBand(labels, unit, perUnitTarget, isCancelled)
+          : await selectDocument(labels, unit, isCancelled);
       if (isCancelled()) break;
+      if (adaptiveAuto) {
+        payload.labels = labels; // labels grew this band
+        cb.onLabels?.(labels);
+      }
       payload.sentences.push(...selected);
       consumed += unit.length;
       payload.classifiedCount = consumed;
@@ -1097,7 +1395,13 @@ export async function runSkim(
     if (job.cancelled || !isReaderAlive(reader)) {
       finalizeTokens();
       await cacheWrite(key, payload);
-      cb.onError("Stopped — progress saved, Generate resumes");
+      // Keep the partial highlights on screen — stopping should not erase work.
+      const kept = await paint(payload, true);
+      cb.onError(
+        kept
+          ? `Paused — ${kept} highlights kept, Resume to continue`
+          : "Paused — progress saved, Resume to continue",
+      );
       return;
     }
     payload.complete = true;
@@ -1112,7 +1416,7 @@ export async function runSkim(
       try {
         cb.onStatus("Summarizing (TL;DR)…");
         const title = String(attachment.getField("title") || "").trim();
-        const text = await leadingText(reader, job.pageCache);
+        const text = await leadingText(reader, attachment, job.pageCache);
         if (text) {
           const tldr = await summarizeText(
             title,
