@@ -4,6 +4,7 @@
  */
 import {
   annotationPositionForRange,
+  epubAnnotationsFromSpecs,
   HighlightSpec,
   PageText,
 } from "../reader/adapter";
@@ -65,6 +66,43 @@ function annotationJSON(
     position,
     dateModified: "",
   };
+}
+
+/**
+ * EPUB equivalent of saveNativeHighlights. Positions are EPUB CFIs rather than
+ * page rects, produced by the reader view from the same DOM ranges the overlay
+ * painter uses. Only sentences in rendered sections can be converted; the count
+ * that could not be is returned so the UI can say so plainly.
+ */
+export async function saveEpubHighlights(
+  attachment: Zotero.Item,
+  reader: any,
+  specs: HighlightSpec[],
+): Promise<{ saved: string[]; skipped: number }> {
+  if (!attachment.libraryID) {
+    throw new Error(
+      "The EPUB attachment must be saved in a Zotero library first",
+    );
+  }
+  const { annotations, skipped } = epubAnnotationsFromSpecs(reader, specs);
+  const saved: string[] = [];
+  for (const ann of annotations) {
+    const key = annotationKey();
+    const json = {
+      ...ann,
+      id: key,
+      key,
+      libraryID: attachment.libraryID,
+      isExternal: false,
+      readOnly: false,
+      comment: "",
+      pageLabel: String(ann.pageLabel ?? ""),
+      dateModified: "",
+    } as _ZoteroTypes.Annotations.AnnotationJson;
+    const item = await Zotero.Annotations.saveFromJSON(attachment, json);
+    saved.push(item.key);
+  }
+  return { saved, skipped };
 }
 
 export async function saveNativeHighlights(

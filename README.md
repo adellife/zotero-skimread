@@ -202,8 +202,12 @@ document-type-aware label discovery, alongside the existing document-wide
 skimming highlights, TL;DR summaries, and native Zotero annotation export.
 Inline citation cards are planned for a later release.
 
-Known limitations: EPUB highlights are not yet exportable as native Zotero
-annotations (PDFs are), and scanned PDFs need OCR first.
+**Save as Zotero annotations** works for both PDFs and EPUBs. For EPUBs, only
+passages in chapters the reader has already rendered can be converted; scroll
+through the book once if some are reported as skipped.
+
+Known limitation: scanned PDFs need OCR first, since SkimRead requires
+selectable text.
 
 ## Develop
 

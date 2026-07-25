@@ -488,11 +488,16 @@ async function onSaveAnnotations(body: HTMLElement) {
   setProgress(body, "Saving Zotero annotations…");
   try {
     const result = await saveSkimAsAnnotations(reader, attachment);
+    // EPUBs can only convert passages in already-rendered chapters, so say so
+    // rather than quietly saving fewer than the user can see.
+    const skippedNote = result.skipped
+      ? ` ${result.skipped} skipped (chapter not rendered yet).`
+      : "";
     setProgress(
       body,
       result.alreadySaved
         ? `${result.saved} Zotero annotations already saved.`
-        : `Saved ${result.saved} Zotero annotations.`,
+        : `Saved ${result.saved} Zotero annotations.${skippedNote}`,
     );
   } catch (error) {
     setProgress(body, `⚠ ${String((error as Error).message || error)}`);

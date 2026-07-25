@@ -56,7 +56,7 @@ import {
   PageText,
 } from "../reader/adapter";
 import { extractEpubSections } from "../reader/epub";
-import { saveNativeHighlights } from "./annotations";
+import { saveEpubHighlights, saveNativeHighlights } from "./annotations";
 
 /** Reader document type. EPUBs use a text-only (no-overlay) path. */
 function isEpub(reader: any): boolean {
@@ -898,7 +898,7 @@ function selectTopPerPage(
 export async function saveSkimAsAnnotations(
   reader: any,
   attachment: Zotero.Item,
-): Promise<{ saved: number; alreadySaved: boolean }> {
+): Promise<{ saved: number; alreadySaved: boolean; skipped?: number }> {
   const key = await cacheKey(attachment);
   const payload = await cacheRead(key);
   if (!payload?.complete) {
@@ -912,6 +912,25 @@ export async function saveSkimAsAnnotations(
   if (!specs.length) {
     throw new Error("There are no visible highlights to save");
   }
+
+  // EPUBs are positioned by CFI, produced from live DOM ranges, so only
+  // currently-rendered sections can be converted.
+  if (isEpub(reader)) {
+    const { saved, skipped } = await saveEpubHighlights(
+      attachment,
+      reader,
+      specs,
+    );
+    if (!saved.length) {
+      throw new Error(
+        "Could not locate the highlighted text in the book. Scroll through the chapters once, then try again",
+      );
+    }
+    payload.savedAnnotationKeys = saved;
+    await cacheWrite(key, payload);
+    return { saved: saved.length, alreadySaved: false, skipped };
+  }
+
   const pages = new Map<number, PageText>();
   for (const pageIndex of new Set(specs.map((spec) => spec.pageIndex))) {
     const page = await extractPage(reader, pageIndex);

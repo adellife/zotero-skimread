@@ -437,6 +437,111 @@ export function canPaintEpub(reader: any): boolean {
 
 const EPUB_FLAG_LAYER_ID = "skimread-flag-layer";
 
+/**
+ * Build a normalized text index over the currently rendered EPUB body, with a
+ * per-character map back to (textNode, offset). Shared by the painter and by
+ * annotation export so both locate a sentence exactly the same way.
+ */
+function buildEpubIndex(doc: any): { s: string; map: Array<[any, number]> } {
+  const walker = doc.createTreeWalker(doc.body, 4 /* SHOW_TEXT */);
+  let s = "";
+  const map: Array<[any, number]> = [];
+  let node: any;
+  while ((node = walker.nextNode())) {
+    const p = node.parentElement;
+    if (!p || !p.getClientRects || p.getClientRects().length === 0) continue;
+    const t: string = node.textContent || "";
+    for (let i = 0; i < t.length; i++) {
+      const ns = normChar(t[i]);
+      for (let k = 0; k < ns.length; k++) {
+        s += ns[k];
+        map.push([node, i]);
+      }
+    }
+  }
+  return { s, map };
+}
+
+/** Locate one normalized query in the index and return its DOM range. */
+function epubRangeForQuery(
+  doc: any,
+  q: string,
+  s: string,
+  map: Array<[any, number]>,
+): any | null {
+  const hit = findNormalizedIndex(s, q);
+  if (!hit) return null;
+  const a = map[hit.at];
+  const b = map[hit.at + hit.len - 1];
+  if (!a || !b) return null;
+  try {
+    const range = doc.createRange();
+    range.setStart(a[0], a[1]);
+    range.setEnd(b[0], b[1] + 1);
+    return range;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Convert highlight specs into Zotero annotation JSON for an EPUB.
+ *
+ * EPUB annotations are positioned by CFI rather than page rects, and the reader
+ * view already knows how to produce one from a DOM range — the same ranges the
+ * overlay painter builds. Only sentences in currently-rendered sections can be
+ * converted, so unrendered chapters are reported back as skipped rather than
+ * silently dropped.
+ */
+export function epubAnnotationsFromSpecs(
+  reader: any,
+  specs: HighlightSpec[],
+): { annotations: any[]; skipped: number } {
+  const h = getEpubHandle(reader);
+  if (!h) return { annotations: [], skipped: specs.length };
+  const { pv, doc } = h;
+  if (typeof pv.getAnnotationFromRange !== "function") {
+    return { annotations: [], skipped: specs.length };
+  }
+  const { s, map } = buildEpubIndex(doc);
+  const annotations: any[] = [];
+  let skipped = 0;
+  for (const spec of specs) {
+    const q = normalizeText(spec.text);
+    const range = q ? epubRangeForQuery(doc, q, s, map) : null;
+    if (!range) {
+      skipped++;
+      continue;
+    }
+    try {
+      const ann = pv.getAnnotationFromRange(
+        range,
+        "highlight",
+        hexColor(spec.colorRGB),
+      );
+      if (ann?.position) annotations.push(ann);
+      else skipped++;
+    } catch {
+      skipped++;
+    }
+  }
+  return { annotations, skipped };
+}
+
+function hexColor(colorRGB: string): string {
+  const parts = colorRGB.split(",").map((v) => Number(v.trim()));
+  if (parts.length !== 3 || parts.some((v) => !Number.isFinite(v))) {
+    return "#ffd400";
+  }
+  return `#${parts
+    .map((v) =>
+      Math.max(0, Math.min(255, Math.round(v)))
+        .toString(16)
+        .padStart(2, "0"),
+    )
+    .join("")}`;
+}
+
 export async function installEpubOverlays(
   reader: any,
   specs: HighlightSpec[],
@@ -485,25 +590,7 @@ export async function installEpubOverlays(
   // glyph can expand to several normalized chars (ligatures), so each expanded
   // position maps back to the same source offset — a matched range still covers
   // the whole glyph.
-  const buildIndex = (): { s: string; map: Array<[any, number]> } => {
-    const walker = doc.createTreeWalker(doc.body, 4 /* SHOW_TEXT */);
-    let s = "";
-    const map: Array<[any, number]> = [];
-    let node: any;
-    while ((node = walker.nextNode())) {
-      const p = node.parentElement;
-      if (!p || !p.getClientRects || p.getClientRects().length === 0) continue;
-      const t: string = node.textContent || "";
-      for (let i = 0; i < t.length; i++) {
-        const ns = normChar(t[i]);
-        for (let k = 0; k < ns.length; k++) {
-          s += ns[k];
-          map.push([node, i]);
-        }
-      }
-    }
-    return { s, map };
-  };
+  const buildIndex = () => buildEpubIndex(doc);
 
   // Locate one query's first rendered occurrence and return its DOM range.
   const rangeForQuery = (
