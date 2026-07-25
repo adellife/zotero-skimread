@@ -238,6 +238,9 @@ Except where a source file states otherwise, no code is reused from them:
   SkimRead is designed to run alongside it without overlapping its features, and
   its local-CLI provider integrations (Codex App Server, Claude Code) were a
   reference point for SkimRead's own subscription-login providers.
+- [zotero-skimming](https://github.com/00sapo/zotero-skimming) by 00sapo — an
+  independent plugin with the same goal, developed in parallel and worth trying
+  alongside this one.
 - [Nodus](https://github.com/Drakonis96/nodus) by Drakonis96 (MIT) — its
   Zotero auto-highlighter demonstrated a robust way to match model-quoted text
   back to the document. SkimRead's quote normalisation (NFKC, ligatures, quote
