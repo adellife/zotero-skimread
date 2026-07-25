@@ -20,6 +20,23 @@ function colorToHex(colorRGB: string): string {
   return `#${parts.map((value) => value.toString(16).padStart(2, "0")).join("")}`;
 }
 
+/**
+ * Tag carrying the rhetorical label. Colour alone is lossy: it is easy to
+ * change, indistinguishable once several labels share a palette, and invisible
+ * to search. A tag keeps the category attached to the annotation, and makes the
+ * set filterable in Zotero and groupable in "Add Note from Annotations".
+ */
+type AnnotationTags = _ZoteroTypes.Annotations.AnnotationJson["tags"];
+
+function labelTags(label: string): AnnotationTags {
+  const name = String(label || "").trim();
+  // saveFromJSON does `setTags((json.tags || []).map(t => ({tag: t.name})))`,
+  // so the runtime wants an array of {name} — verified against Zotero 9.0.6
+  // source. The bundled typings describe a single {name,color} object instead,
+  // so cast at this one boundary rather than weaken the call sites.
+  return (name ? [{ name }] : []) as unknown as AnnotationTags;
+}
+
 function annotationKey(): string {
   const alphabet = "23456789ABCDEFGHIJKLMNPQRSTUVWXYZ";
   const random = crypto.getRandomValues(new Uint8Array(8));
@@ -64,6 +81,7 @@ function annotationJSON(
     pageLabel: String(spec.pageIndex + 1),
     sortIndex: sortIndex(spec.pageIndex, spec.startChar),
     position,
+    tags: labelTags(spec.label),
     dateModified: "",
   };
 }
@@ -97,6 +115,7 @@ export async function saveEpubHighlights(
       readOnly: false,
       comment: "",
       pageLabel: String(ann.pageLabel ?? ""),
+      tags: labelTags(ann.skimreadLabel),
       dateModified: "",
     } as _ZoteroTypes.Annotations.AnnotationJson;
     const item = await Zotero.Annotations.saveFromJSON(attachment, json);

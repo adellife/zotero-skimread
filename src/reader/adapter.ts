@@ -519,7 +519,9 @@ export function epubAnnotationsFromSpecs(
         "highlight",
         hexColor(spec.colorRGB),
       );
-      if (ann?.position) annotations.push(ann);
+      // Carry the rhetorical label alongside; the caller turns it into a tag.
+      if (ann?.position)
+        annotations.push({ ...ann, skimreadLabel: spec.label });
       else skipped++;
     } catch {
       skipped++;

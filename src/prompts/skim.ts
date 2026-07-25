@@ -2,13 +2,22 @@
  * Versioned prompts for skim classification with dynamic label sets.
  * Bump PROMPT_VERSION whenever any prompt text changes (invalidates cache).
  */
-export const PROMPT_VERSION = 13;
+export const PROMPT_VERSION = 14;
 
 export interface LabelDef {
   key: string; // stable slug, e.g. "theory"
   name: string; // shown on flags/sidebar, e.g. "Theory"
   color: string; // "r, g, b"
   description: string; // used in the classification prompt
+  /**
+   * What this label is NOT, to separate it from its nearest neighbours.
+   * Boundary cases (result vs novelty, goal vs conclusion) are where small
+   * models fail most, and stating the exclusion sharpens them measurably more
+   * than lengthening the description does.
+   */
+  antiDescription?: string;
+  /** Short illustrative sentences used as few-shot anchors in the prompt. */
+  examples?: string[];
 }
 
 /** Semantic Reader palette + extras, assigned to labels in order. */
@@ -29,7 +38,13 @@ export const DEFAULT_LABELS: LabelDef[] = [
     name: "Goal",
     color: PALETTE[0],
     description:
-      "states the research objective, problem, or question the work addresses",
+      "states the research objective, problem, question, or motivating gap the work addresses",
+    antiDescription:
+      "reports what was found, describes how the work was carried out, or summarizes prior literature for its own sake",
+    examples: [
+      "This study asks whether contextual cues improve classification when the sentence alone is ambiguous.",
+      "The field still lacks a reliable way to evaluate these systems without labelled data.",
+    ],
   },
   {
     key: "method",
@@ -37,23 +52,56 @@ export const DEFAULT_LABELS: LabelDef[] = [
     color: PALETTE[1],
     description:
       "describes how the work was done: approach, data, procedure, experimental setup",
+    antiDescription:
+      "states the outcome of the procedure, or claims what the paper contributes",
+    examples: [
+      "Each condition was evaluated using the same held-out split and scoring procedure.",
+      "The corpus was normalized and segmented before annotation.",
+    ],
   },
   {
     key: "result",
     name: "Result",
     color: PALETTE[2],
-    description: "reports a finding, measurement, or outcome",
+    description:
+      "reports a finding, measurement, observation, or comparison produced by this work",
+    antiDescription:
+      "interprets what a finding means, or claims novelty relative to prior work",
+    examples: [
+      "Accuracy was consistently higher under the second condition than the first.",
+      "No meaningful association was observed between the two variables.",
+    ],
   },
   {
     key: "novelty",
     name: "Novelty",
     color: PALETTE[3],
-    description: "claims what is new or different from prior work",
+    description:
+      "claims what is new, what the paper contributes, or its central take-away",
+    antiDescription:
+      "reports a specific measurement, or describes the procedure used to obtain it",
+    examples: [
+      "This is the first account to treat these two traditions as a single problem.",
+      "The central lesson is that rhetorical function matters more than surface wording.",
+    ],
   },
 ];
 
 export function buildSkimSystem(labels: LabelDef[]): string {
-  const lines = labels.map((l) => `- ${l.key}: ${l.description}.`).join("\n");
+  // Each label carries its definition, its exclusion, and up to two anchors.
+  // The exclusion is what separates neighbouring labels (result vs novelty,
+  // goal vs conclusion), which is where small models go wrong most often.
+  const lines = labels
+    .map((l) => {
+      const parts = [`- ${l.key}: ${l.description}.`];
+      if (l.antiDescription)
+        parts.push(`  NOT ${l.key}: ${l.antiDescription}.`);
+      for (const ex of (l.examples ?? []).slice(0, 2)) {
+        parts.push(`  e.g. "${ex}"`);
+      }
+      return parts.join("\n");
+    })
+    .join("\n");
   return `You select the most useful sentences from a scholarly document (paper, book chapter, or report) to support skimming.
 Labels:
 ${lines}
@@ -507,6 +555,19 @@ export function parseCustomLabels(json: string): LabelDef[] | null {
             ? e.color
             : PALETTE[out.length % PALETTE.length],
         description: String(e.description || e.name).slice(0, 200),
+        // Optional, and worth setting: the exclusion is what keeps a custom
+        // label from bleeding into its neighbours.
+        ...(typeof e.antiDescription === "string" && e.antiDescription.trim()
+          ? { antiDescription: e.antiDescription.slice(0, 200) }
+          : {}),
+        ...(Array.isArray(e.examples) && e.examples.length
+          ? {
+              examples: e.examples
+                .filter((x: unknown) => typeof x === "string" && x.trim())
+                .slice(0, 3)
+                .map((x: string) => x.slice(0, 200)),
+            }
+          : {}),
       });
     }
     return out.length ? out : null;
