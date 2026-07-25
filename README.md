@@ -7,6 +7,9 @@ them as coloured overlays in the reader.
 
 It is designed to work independently of other Zotero AI plugins.
 
+It is a triage aid, not a summary and not a substitute for reading. Please see
+[Limitations and bias](#limitations-and-bias) before relying on it.
+
 ## What it does
 
 - Selects highlights in relation to the complete document, not sentence by sentence.
@@ -145,6 +148,41 @@ OpenAI, Anthropic, and Codex App Server are optional cloud modes. SkimRead
 will not use any of them until you explicitly enable the cloud-consent setting;
 there is no silent fallback from a local provider to a cloud provider. API keys,
 prompts, and provider transcripts are not logged or cached by the plugin.
+
+## Limitations and bias
+
+SkimRead decides what to show you, which means it also decides what you do not
+look at. That is a real editorial act, and it is worth being clear about how it
+can go wrong.
+
+- **It is a triage aid, not a summary and not a substitute for reading.** The
+  intended use is to get the shape of a document before deciding whether and
+  how to read it properly. Highlights should tell you where to look, not what
+  to conclude.
+- **What is not highlighted disappears.** The strongest bias is the one you
+  cannot see: an argument the model judged unimportant simply never draws your
+  eye. Skimming a paper you would otherwise have read closely is a real cost,
+  not a neutral shortcut.
+- **The default scheme carries a discipline bias.** Goal / Method / Result /
+  Novelty describes empirical, IMRaD-shaped research. Humanities and theory
+  work, close readings, historiography, and long-form argument fit it poorly,
+  and forcing them into it will distort what surfaces. Use _Custom_ labels or
+  _Auto-discover_ for that work rather than accepting the default.
+- **Extraction drops text before the model ever sees it.** Running heads,
+  footers, and small-font footnotes are discarded as page furniture, and
+  unusual two-column layouts can be read out of order. Footnotes in particular
+  can carry the substance of an argument in historical and legal scholarship,
+  and SkimRead currently cannot highlight what it never extracted.
+- **Language and model size matter.** Selection quality is best on English
+  academic prose. Smaller local models are noticeably weaker at judgement (they
+  are reliable at picking sentences, less reliable at deciding which sentences
+  deserve picking), so treat a 2B model's output as a rough map.
+- **Different settings give different papers.** Re-running with another label
+  set or a different model can change the picture substantially. If a document
+  matters, it is worth regenerating once to see what moves.
+
+If you are using this to decide what to cite, read the source. If you are using
+it to decide what to read next, that is what it is for.
 
 ## Troubleshooting
 
