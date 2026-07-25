@@ -2,7 +2,7 @@
  * Versioned prompts for skim classification with dynamic label sets.
  * Bump PROMPT_VERSION whenever any prompt text changes (invalidates cache).
  */
-export const PROMPT_VERSION = 14;
+export const PROMPT_VERSION = 15;
 
 export interface LabelDef {
   key: string; // stable slug, e.g. "theory"
@@ -195,7 +195,10 @@ export function buildBandSelectionPrompt(
 ): string {
   const keys = labels.map((label) => label.key).join(" | ");
   return [
-    `This is ONE passage from a larger document. Select the ${targetCount} most useful sentences here to highlight for skimming (at most ${targetCount + 1}).`,
+    // Soft ceiling, floor of one. A hard quota forced boilerplate passages to
+    // yield their full share while capping the passage carrying the argument.
+    `This is ONE passage from a larger document. Select up to ${targetCount} sentences here worth highlighting for skimming.`,
+    "Select fewer if fewer deserve it, but always select at least one. A later pass judges the document as a whole, so include a candidate you are unsure about rather than leaving a gap.",
     "Pick the most informative ones and spread them across the passage; do not cluster them together.",
     "Use the numeric id exactly as supplied. Do not return a sentence more than once.",
     "Return ONLY this JSON, no prose or code fences:",
@@ -260,6 +263,89 @@ export interface AdaptiveResult {
 }
 
 /** Validate adaptive output: any non-empty label is allowed (reconciled later). */
+// ---------- reduce pass ----------
+// Band selection is a "map": each passage is judged on its own, so nothing ever
+// sees the document as a whole. The reduce pass closes that gap — it reads only
+// the candidates and marks the subset that together narrates the paper, which
+// is also where redundant restatements get dropped.
+
+export const REDUCE_SYSTEM = `You are given the sentences a first pass selected as candidates from one scholarly document, in reading order.
+Choose the subset that together tells the document's story: what it set out to do, how, what it found, and why that matters.
+Prefer a sentence that carries the argument over one that merely restates it. When two candidates say substantially the same thing, keep only the clearer one.
+Keep the narrative spread across the whole document; do not keep only the opening or only the conclusion.
+Select only the supplied ids, never rewrite text. Return JSON only.`;
+
+export const REDUCE_SCHEMA = {
+  type: "object",
+  properties: {
+    core: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          id: { type: "integer" },
+          importance: { type: "number" },
+        },
+        required: ["id", "importance"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["core"],
+  additionalProperties: false,
+};
+
+export function buildReducePrompt(
+  candidates: { id: number; pageIndex: number; label: string; text: string }[],
+  targetCount: number,
+): string {
+  return [
+    `These ${candidates.length} candidates come from one document, in reading order.`,
+    `Keep about ${targetCount} that together narrate it. Keep fewer if the document does not warrant more.`,
+    "Drop candidates that repeat a point already made by a stronger one.",
+    "Use the numeric id exactly as supplied; do not return an id twice.",
+    "",
+    "Return ONLY this JSON, no prose or code fences:",
+    `{"core":[{"id":<integer>,"importance":<0..1>}]}`,
+    "",
+    ...candidates.map(
+      (c) => `${c.id} | page ${c.pageIndex + 1} | ${c.label} | ${c.text}`,
+    ),
+  ].join("\n");
+}
+
+/** Ids the reduce pass kept, with its importance score. */
+export function validateReduce(
+  raw: unknown,
+  candidateCount: number,
+): { id: number; importance: number }[] | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const arr =
+    (raw as { core?: unknown }).core ??
+    (raw as { selected?: unknown }).selected;
+  if (!Array.isArray(arr)) return null;
+  const seen = new Set<number>();
+  const out: { id: number; importance: number }[] = [];
+  for (const entry of arr) {
+    const e =
+      typeof entry === "number"
+        ? { id: entry }
+        : (entry as Record<string, unknown> | null);
+    if (!e) continue;
+    const idRaw = typeof e.id === "number" ? e.id : Number(e.id);
+    if (!Number.isFinite(idRaw)) continue;
+    const id = Math.trunc(idRaw);
+    if (id < 0 || id >= candidateCount || seen.has(id)) continue;
+    seen.add(id);
+    const imp = Number(e.importance);
+    out.push({
+      id,
+      importance: Number.isFinite(imp) ? Math.max(0, Math.min(1, imp)) : 0.9,
+    });
+  }
+  return out.length ? out : null;
+}
+
 export function validateAdaptiveSelection(
   raw: unknown,
   sentenceCount: number,

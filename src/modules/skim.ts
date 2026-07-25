@@ -31,6 +31,10 @@ import {
   PALETTE,
   ADAPTIVE_SCHEMA,
   ADAPTIVE_SYSTEM,
+  REDUCE_SCHEMA,
+  REDUCE_SYSTEM,
+  buildReducePrompt,
+  validateReduce,
   buildAdaptiveSelectionPrompt,
   buildBandSelectionPrompt,
   buildDocumentSelectionPrompt,
@@ -121,6 +125,12 @@ export interface ClassifiedSentence {
   text: string;
   label: string;
   confidence: number;
+  /**
+   * Kept by the reduce pass as part of the document's narrative. Core sentences
+   * are shown first at any density; the rest fill the remaining slots, so the
+   * density slider becomes "how much beyond the core story to show".
+   */
+  core?: boolean;
 }
 
 interface CachePayload {
@@ -150,6 +160,10 @@ interface CachePayload {
    */
   extracted?: ExtractedSentence[];
   extractComplete?: boolean;
+  /** Whether the whole-document reduce pass has already run for this payload. */
+  reduced?: boolean;
+  /** How many candidates it kept as the narrative core (0 if it failed). */
+  coreCount?: number;
 }
 
 interface JobState {
@@ -304,6 +318,8 @@ export interface CacheSummary {
   pageSpan: number;
   tokensInput: number;
   tokensOutput: number;
+  /** candidates the reduce pass kept as the document's narrative core */
+  coreCount: number;
 }
 
 /** Persistent run summary for the sidebar's idle status line. */
@@ -320,6 +336,7 @@ export async function cacheSummary(
       pageSpan: 0,
       tokensInput: 0,
       tokensOutput: 0,
+      coreCount: 0,
     };
   }
   const kept = payload.sentences.filter(
@@ -333,6 +350,7 @@ export async function cacheSummary(
     pageSpan: payload.pageSpan || 0,
     tokensInput: payload.tokensInput || 0,
     tokensOutput: payload.tokensOutput || 0,
+    coreCount: kept.filter((s) => s.core).length,
   };
 }
 
@@ -859,6 +877,57 @@ export function countByLabel(
   return counts;
 }
 
+/**
+ * Reduce pass: the only step that sees the whole document's candidates at once.
+ * Marks the subset that narrates the paper as `core`, dropping restatements.
+ *
+ * Failure is non-fatal by design — if the model errors or returns nothing
+ * usable, every candidate simply stays uncored and the run behaves exactly as
+ * it did before this pass existed.
+ */
+async function reducePass(
+  sentences: ClassifiedSentence[],
+  pageSpan: number,
+  isCancelled: () => boolean,
+): Promise<boolean> {
+  if (sentences.length < 6) return false; // nothing to consolidate
+  const model = modelForProvider(String(getPref("skimModel")));
+  const targetCount = Math.max(4, Math.min(24, Math.round(pageSpan * 1.2)));
+  const candidates = sentences.map((s, id) => ({
+    id,
+    pageIndex: s.pageIndex,
+    label: s.label,
+    text: s.text,
+  }));
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (isCancelled()) return false;
+    try {
+      const raw = await chatJSON({
+        model,
+        system: REDUCE_SYSTEM,
+        user:
+          (attempt
+            ? "Your previous response did not match the required schema. Return only valid JSON.\n\n"
+            : "") + buildReducePrompt(candidates, targetCount),
+        schema: REDUCE_SCHEMA,
+      });
+      const kept = validateReduce(raw, candidates.length);
+      if (!kept?.length) continue;
+      for (const { id, importance } of kept) {
+        sentences[id].core = true;
+        sentences[id].confidence = Math.max(
+          sentences[id].confidence,
+          importance,
+        );
+      }
+      return true;
+    } catch (e) {
+      ztoolkit.log("skimread reduce error", e);
+    }
+  }
+  return false;
+}
+
 function selectTopPerPage(
   all: ClassifiedSentence[],
   labels: LabelDef[],
@@ -875,7 +944,12 @@ function selectTopPerPage(
   }
   const specs: HighlightSpec[] = [];
   for (const list of byPage.values()) {
-    list.sort((a, b) => b.confidence - a.confidence);
+    // Core (narrative) sentences first, then the rest by confidence, so raising
+    // density adds context around the story rather than reshuffling it.
+    list.sort(
+      (a, b) =>
+        Number(!!b.core) - Number(!!a.core) || b.confidence - a.confidence,
+    );
     for (const s of list.slice(0, density)) {
       const def = byKey.get(s.label)!;
       specs.push({
@@ -1403,6 +1477,22 @@ export async function runSkim(
       payload.classifiedCount = consumed;
       await cacheWrite(key, payload);
       await paint(payload); // progressive: bands appear as they finish
+    }
+
+    // ---- reduce ----
+    // One pass over all candidates, seeing the document whole for the first
+    // time. Skipped when resuming a run that already did it.
+    if (!isCancelled() && !payload.reduced && payload.sentences.length >= 6) {
+      cb.onStatus("Choosing the sentences that narrate the document…");
+      const ok = await reducePass(payload.sentences, pageSpan, isCancelled);
+      if (!isCancelled()) {
+        payload.reduced = true;
+        payload.coreCount = ok
+          ? payload.sentences.filter((s) => s.core).length
+          : 0;
+        await cacheWrite(key, payload);
+        await paint(payload);
+      }
     }
 
     const finalizeTokens = () => {

@@ -595,10 +595,12 @@ async function refreshRunSummary(body: HTMLElement) {
   const coverage = summary.pageSpan
     ? ` across ${summary.pagesCovered}/${summary.pageSpan} pages`
     : "";
+  // How many of the shown highlights the reduce pass judged to carry the story.
+  const core = summary.coreCount ? ` · ${summary.coreCount} core` : "";
   if (summary.state === "complete") {
     setProgress(
       body,
-      `✓ Complete — ${summary.selections} highlights${coverage}${tokens}`,
+      `✓ Complete — ${summary.selections} highlights${coverage}${core}${tokens}`,
     );
   } else if (summary.state === "partial") {
     setProgress(
