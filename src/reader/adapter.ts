@@ -43,6 +43,25 @@ interface ReaderHandle {
 const HL_CLASS = "skimread-hl";
 const Cu = Components.utils;
 
+/** Base margin-flag metrics at 100% zoom, in CSS pixels. */
+const FLAG_BASE_FONT = 9;
+const FLAG_BASE_BORDER = 3;
+
+/**
+ * Size a margin flag for the current zoom. Flags sit alongside text that scales
+ * with the viewport, so a fixed pixel size reads as "too small" zoomed in and
+ * oversized zoomed out. Clamped: below ~0.85 the text becomes unreadable, above
+ * ~2 the chip starts crowding the margin.
+ */
+function applyFlagScale(flag: any, rawScale: number, colorRGB: string): void {
+  const scale = Math.max(0.85, Math.min(2, rawScale || 1));
+  const px = (n: number) => `${(n * scale).toFixed(1)}px`;
+  flag.style.font = `600 ${px(FLAG_BASE_FONT)} sans-serif`;
+  flag.style.padding = `${px(1)} ${px(5)} ${px(1)} ${px(4)}`;
+  flag.style.borderRight = `${px(FLAG_BASE_BORDER)} solid rgb(${colorRGB})`;
+  flag.style.borderRadius = `${px(2)} 0 0 ${px(2)}`;
+}
+
 /** Resolve the reader shown in the given main-window tab. */
 export function getReaderForTab(tabID: string): any | null {
   return Zotero.Reader.getByTabID(tabID) || null;
@@ -300,7 +319,11 @@ export async function installOverlays(
             spec.label.charAt(0).toUpperCase() + spec.label.slice(1);
           flag.style.top = `${top}px`;
           flag.style.left = "2px";
-          flag.style.borderRight = `3px solid rgb(${spec.colorRGB})`;
+          // Highlight rects are in viewport coordinates and grow with zoom, so
+          // a fixed-size chip shrinks relative to the text. Scale it to match,
+          // clamped so it stays legible when zoomed out and does not dominate
+          // the margin when zoomed far in.
+          applyFlagScale(flag, pv.viewport?.scale ?? 1, spec.colorRGB);
           pageDiv.appendChild(flag);
         }
         first = false;
@@ -666,11 +689,11 @@ export async function installEpubOverlays(
         "position:fixed;" +
           anchor +
           `top:${Math.round(rc.top)}px;` +
-          "font:600 9px sans-serif;padding:1px 5px 1px 4px;" +
-          "background:#fff;color:#2e414f;border-radius:2px 0 0 2px;" +
-          `border-right:3px solid rgb(${rl.color});` +
+          "background:#fff;color:#2e414f;" +
           "box-shadow:0 0 2px rgba(0,0,0,0.35);white-space:nowrap;",
       );
+      // Track the reader's zoom, as on the PDF side.
+      applyFlagScale(flag, pv.scale ?? 1, rl.color);
       layer.appendChild(flag);
     }
   };
