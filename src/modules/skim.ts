@@ -381,14 +381,63 @@ export async function hasSavedAnnotations(
 // ---------- segmentation ----------
 
 /** Map a page.text [startText, endText) span to a candidate sentence. */
+// An author byline carries affiliation superscripts that extract as digits glued
+// to the surname ("Jurgens2,4", "Aiello1,5"). On a title page the byline usually
+// runs straight into the abstract with no sentence-ending punctuation, so the
+// segmenter hands back one span that begins with author names — and highlighting
+// it starts the highlight on the authors.
+const BYLINE_TOKEN = /[A-Z][A-Za-z'’-]+\d[\d,]*/g;
+
+/**
+ * Offset at which real prose begins, if this span opens with an author byline.
+ * Returns 0 when it does not. Trimming rather than dropping keeps the abstract
+ * sentence the byline is glued to, which is usually worth highlighting.
+ */
+function bylineTrimOffset(text: string): number {
+  const head = text.slice(0, 240);
+  BYLINE_TOKEN.lastIndex = 0;
+  let matches = 0;
+  let end = -1;
+  let m: RegExpExecArray | null;
+  while ((m = BYLINE_TOKEN.exec(head))) {
+    // Only a run starting at the very beginning of the span is a byline; a
+    // "Smith2020 argued" mid-prose must not trigger this.
+    if (m.index > 140) break;
+    matches++;
+    end = m.index + m[0].length;
+  }
+  // Two or more superscripted names is the signal; one could be a citation.
+  if (matches < 2 || end < 0) return 0;
+  // Skip the separators that follow the last author.
+  const rest = text.slice(end);
+  const lead = rest.match(/^[\s,;&]*(?:and\s+)?/);
+  return end + (lead ? lead[0].length : 0);
+}
+
 function pushSpan(
   page: PageText,
   out: Omit<ExtractedSentence, "pageIndex" | "section">[],
   startText: number,
   endText: number,
 ): void {
-  const text = page.text.slice(startText, endText).trim();
+  const raw = page.text.slice(startText, endText);
+  const leadingWs = raw.length - raw.trimStart().length;
+  let text = raw.trim();
   if (text.length < MIN_LEN || !/[a-zA-Z]{3}/.test(text)) return;
+  // Title pages only: elsewhere a leading capitalised-name-plus-digits run is
+  // far more likely to be prose than a byline.
+  if (page.pageIndex === 0) {
+    const skip = bylineTrimOffset(text);
+    if (skip > 0) {
+      const kept = text.slice(skip).trimStart();
+      // If nothing substantial follows, the span was byline all the way down.
+      if (kept.length < MIN_LEN) return;
+      // Advance the text offset by exactly what was removed, so the char range
+      // (and therefore the painted rectangle) starts at the prose.
+      startText += leadingWs + (text.length - kept.length);
+      text = kept;
+    }
+  }
   let startChar = -1;
   let endChar = -1;
   for (let i = startText; i < endText && i < page.charMap.length; i++) {
