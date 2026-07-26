@@ -10,14 +10,14 @@ document, dropping sentences that merely restate a point already made.
 
 The per-passage quota is also softer. It used to demand a fixed number from
 every passage, which forced boilerplate sections to yield their full share while
-capping the section carrying the argument. It now asks for *up to* that number.
+capping the section carrying the argument. It now asks for _up to_ that number.
 
 Kept sentences are flagged rather than deleted, so the density slider means
 something again: core sentences show first, and raising density adds context
 around them instead of saturating at roughly two per page. The sidebar reports
 how many were kept, for example `24 highlights across 9/12 pages · 11 core`.
 
-**Sharper labels.** Each label now carries what it is *not*, plus a couple of
+**Sharper labels.** Each label now carries what it is _not_, plus a couple of
 example sentences. Neighbouring categories (result vs novelty, goal vs
 conclusion) are where smaller models go wrong most often, and stating the
 exclusion separates them better than a longer description does. Custom labels
