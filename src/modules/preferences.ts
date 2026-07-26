@@ -91,6 +91,79 @@ export function onPrefsLoad(window: Window) {
     sel.addEventListener("change", save);
   }
 
+  // --- select binding ---
+  // The `preference` attribute does not bind these elements in this pane (the
+  // provider menulist above is wired by hand for the same reason), so a select
+  // left to it silently neither loads its stored value nor saves a change.
+  const bindSelect = (
+    id: string,
+    pref: "claudeModel" | "codexModel" | "codexReasoning",
+    fallback: string,
+  ) => {
+    const el = $(id) as (HTMLSelectElement & { value: string }) | null;
+    if (!el) return null;
+    const stored = String(getPref(pref) || fallback);
+    // Keep a stored value that is not among the offered options (a full model
+    // ID, or one from a newer CLI) selectable instead of silently rewriting it.
+    const options = Array.from(
+      el.querySelectorAll("option"),
+    ) as HTMLOptionElement[];
+    if (!options.some((o) => o.value === stored)) {
+      const opt = doc.createElementNS(
+        "http://www.w3.org/1999/xhtml",
+        "option",
+      ) as HTMLOptionElement;
+      opt.value = stored;
+      opt.textContent = stored;
+      el.appendChild(opt);
+    }
+    el.value = stored;
+    const save = () => setPref(pref, el.value);
+    el.addEventListener("command", save);
+    el.addEventListener("change", save);
+    return el;
+  };
+
+  bindSelect("claudeModel", "claudeModel", "sonnet");
+  bindSelect("codexReasoning", "codexReasoning", "medium");
+  const codexModelSel = bindSelect("codexModel", "codexModel", "gpt-5.6-luna");
+
+  // Codex exposes a model list over its app server, so offer the real thing
+  // rather than a hardcoded guess. Behind a button: listing starts the CLI.
+  const codexRefresh = $("codex-refresh-models") as HTMLButtonElement | null;
+  if (codexModelSel && codexRefresh) {
+    codexRefresh.addEventListener("click", async () => {
+      const out = $("test-result") as HTMLElement | null;
+      if (out) out.textContent = getString("status-checking");
+      const status = await checkStatus();
+      if (!status.ok || !status.models.length) {
+        if (out) {
+          out.textContent = `Could not list Codex models${
+            status.error ? ` (${status.error})` : ""
+          }`;
+        }
+        return;
+      }
+      const current = codexModelSel.value;
+      codexModelSel.textContent = "";
+      for (const model of status.models) {
+        const opt = doc.createElementNS(
+          "http://www.w3.org/1999/xhtml",
+          "option",
+        ) as HTMLOptionElement;
+        opt.value = model;
+        opt.textContent = model;
+        codexModelSel.appendChild(opt);
+      }
+      // Preserve the current choice when the server still offers it.
+      codexModelSel.value = status.models.includes(current)
+        ? current
+        : status.models[0];
+      setPref("codexModel", codexModelSel.value);
+      if (out) out.textContent = `${status.models.length} Codex models`;
+    });
+  }
+
   // --- model picker: populate the datalist from the server's models ---
   const populateModels = async () => {
     const list = $("model-list") as HTMLElement | null;

@@ -60,21 +60,20 @@
         <html:label for="zotero-prefpane-__addonRef__-codexModel"
           >Codex model</html:label
         >
-        <html:input
-          type="text"
+        <html:select
           id="zotero-prefpane-__addonRef__-codexModel"
-          preference="codexModel"
           style="width: 220px"
+        ></html:select>
+        <button
+          id="zotero-prefpane-__addonRef__-codex-refresh-models"
+          label="Refresh"
         />
       </hbox>
       <hbox align="center">
         <html:label for="zotero-prefpane-__addonRef__-codexReasoning"
           >Codex reasoning</html:label
         >
-        <html:select
-          id="zotero-prefpane-__addonRef__-codexReasoning"
-          preference="codexReasoning"
-        >
+        <html:select id="zotero-prefpane-__addonRef__-codexReasoning">
           <html:option value="low">Low</html:option>
           <html:option value="medium">Medium</html:option>
           <html:option value="high">High</html:option>
@@ -106,7 +105,6 @@
         >
         <html:select
           id="zotero-prefpane-__addonRef__-claudeModel"
-          preference="claudeModel"
           style="width: 220px"
         >
           <html:option value="sonnet"
