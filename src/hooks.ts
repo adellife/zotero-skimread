@@ -1,7 +1,10 @@
 import { initLocale } from "./utils/locale";
 import { createZToolkit } from "./utils/ztoolkit";
 import { registerPrefsPane, onPrefsLoad } from "./modules/preferences";
-import { registerReaderSection } from "./modules/readerSection";
+import {
+  registerReaderSection,
+  unwatchProviderPrefs,
+} from "./modules/readerSection";
 
 async function onStartup() {
   await Promise.all([
@@ -33,6 +36,7 @@ async function onMainWindowUnload(_win: Window): Promise<void> {
 }
 
 function onShutdown(): void {
+  unwatchProviderPrefs();
   ztoolkit.unregisterAll();
   addon.data.alive = false;
   // @ts-expect-error - Plugin instance is not typed

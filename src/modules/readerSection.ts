@@ -7,7 +7,12 @@
 import { config } from "../../package.json";
 import { getLocaleID, getString } from "../utils/locale";
 import { getPref, setPref } from "../utils/prefs";
-import { checkStatus, missingModels } from "../llm/ollama";
+import {
+  checkStatus,
+  connectionHint,
+  missingModels,
+  providerDisplayName,
+} from "../llm/ollama";
 import {
   getReaderForTab,
   navigateToText,
@@ -41,7 +46,63 @@ const MODES: { value: LabelMode; label: string }[] = [
   { value: "auto", label: "Auto-discover from document" },
 ];
 
+// Open panel bodies, so a settings change can refresh their status line. The
+// prefs window is separate from the reader, so nothing re-renders the panel on
+// its own and the line would otherwise keep showing the previous provider.
+const openPanels = new Set<HTMLElement>();
+const prefObservers: symbol[] = [];
+
+const PROVIDER_PREFS = [
+  "apiType",
+  "ollamaUrl",
+  "openaiCompatibleKey",
+  "skimModel",
+  "claudeModel",
+  "claudePath",
+  "codexModel",
+  "codexPath",
+] as const;
+
+function refreshAllStatus() {
+  for (const body of [...openPanels]) {
+    if (!body.isConnected) {
+      openPanels.delete(body); // panel was torn down
+      continue;
+    }
+    void refreshStatus(body);
+  }
+}
+
+export function watchProviderPrefs() {
+  if (prefObservers.length) return;
+  for (const key of PROVIDER_PREFS) {
+    try {
+      prefObservers.push(
+        Zotero.Prefs.registerObserver(
+          `${config.prefsPrefix}.${key}`,
+          refreshAllStatus,
+          true,
+        ) as symbol,
+      );
+    } catch {
+      // A missing pref is not worth failing startup over.
+    }
+  }
+}
+
+export function unwatchProviderPrefs() {
+  for (const id of prefObservers.splice(0)) {
+    try {
+      Zotero.Prefs.unregisterObserver(id);
+    } catch {
+      // already gone
+    }
+  }
+  openPanels.clear();
+}
+
 export function registerReaderSection() {
+  watchProviderPrefs();
   Zotero.ItemPaneManager.registerSection({
     paneID: "skimread-panel",
     pluginID: config.addonID,
@@ -61,6 +122,7 @@ export function registerReaderSection() {
       renderPanel(body);
     },
     onAsyncRender: async ({ body }) => {
+      openPanels.add(body);
       await refreshStatus(body);
       await refreshButtons(body);
       await renderLabelRows(body, null);
@@ -105,8 +167,14 @@ function renderPanel(body: HTMLElement) {
 
   const status = doc.createElement("div");
   status.id = "skimread-status";
-  status.textContent = getString("status-checking");
-  status.style.cssText = "font-size:12px;";
+  status.textContent = getString("status-checking", {
+    args: { provider: providerDisplayName() },
+  });
+  status.style.cssText = "font-size:12px;cursor:pointer;";
+  status.title = "Click to re-check the connection";
+  // Settings live in a different window, so the panel is not re-rendered when
+  // the provider changes. A click re-checks without needing a tab switch.
+  status.addEventListener("click", () => void refreshStatus(body));
   wrap.append(status);
 
   // label mode selector
@@ -707,9 +775,19 @@ function makeSlider(
 async function refreshStatus(body: HTMLElement) {
   const el = body.querySelector("#skimread-status") as HTMLElement | null;
   if (!el) return;
+  // Name the provider being checked, so the line never claims to be talking to
+  // Ollama while a different endpoint is configured.
+  const provider = providerDisplayName();
+  el.textContent = getString("status-checking", { args: { provider } });
+  el.style.color = "";
   const status = await checkStatus();
+  // Settings can change while the request is in flight; a stale reply must not
+  // overwrite a newer one.
+  if (providerDisplayName() !== provider) return;
   if (!status.ok) {
-    el.textContent = getString("status-offline");
+    el.textContent = getString("status-offline", {
+      args: { provider, hint: connectionHint() },
+    });
     el.style.color = "#c0392b";
     return;
   }
@@ -721,7 +799,7 @@ async function refreshStatus(body: HTMLElement) {
     el.style.color = "#b9770e";
   } else {
     el.textContent = getString("status-ok", {
-      args: { version: status.version || "?" },
+      args: { provider, version: status.version || "?" },
     });
     el.style.color = "#1e8449";
   }

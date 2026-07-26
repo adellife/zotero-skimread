@@ -104,12 +104,17 @@
         <html:label for="zotero-prefpane-__addonRef__-claudeModel"
           >Claude model</html:label
         >
-        <html:input
-          type="text"
+        <html:select
           id="zotero-prefpane-__addonRef__-claudeModel"
           preference="claudeModel"
           style="width: 220px"
-        />
+        >
+          <html:option value="sonnet"
+            >Sonnet (balanced, recommended)</html:option
+          >
+          <html:option value="haiku">Haiku (fastest, cheapest)</html:option>
+          <html:option value="opus">Opus (most capable, slowest)</html:option>
+        </html:select>
       </hbox>
       <hbox align="center">
         <html:label for="zotero-prefpane-__addonRef__-claudePath"
@@ -123,7 +128,9 @@
         />
       </hbox>
       <description style="max-width: 520px; font-size: 12px; opacity: 0.8">
-        Model can be an alias like sonnet or opus, or a full model ID.
+        Aliases always resolve to the current version of that model, so this
+        does not need updating when new ones are released. Sonnet suits
+        skimming; Haiku is quicker on long books.
       </description>
     </vbox>
   </vbox>

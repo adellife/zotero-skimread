@@ -44,6 +44,41 @@ export function providerLabel(): string {
   }
 }
 
+/**
+ * Name for the endpoint actually configured, for status messages. The generic
+ * "OpenAI-compatible" transport fronts very different servers, so identify the
+ * real one where the URL makes it obvious rather than always saying Ollama (or
+ * always saying OpenAI-compatible).
+ */
+export function providerDisplayName(): string {
+  const type = apiType();
+  if (type !== "openai-compatible") return providerLabel();
+  const url = baseUrl(true).toLowerCase();
+  if (url.includes(":11434")) return "Ollama";
+  if (url.includes("api.openai.com")) return "OpenAI";
+  if (url.includes("api.anthropic.com")) return "Anthropic";
+  if (url.includes("openrouter.ai")) return "OpenRouter";
+  if (url.includes(":1234")) return "LM Studio";
+  if (url.includes("localhost") || url.includes("127.0.0.1")) {
+    return "Local server";
+  }
+  return "OpenAI-compatible server";
+}
+
+/** What to try when the configured endpoint does not answer. */
+export function connectionHint(): string {
+  switch (apiType()) {
+    case "codex-app-server":
+      return "check the Codex CLI path in Settings";
+    case "claude-code":
+      return 'run "claude login", then check the CLI path in Settings';
+    default:
+      return baseUrl(true).includes(":11434")
+        ? 'start it with "ollama serve"'
+        : "check the server URL in Settings";
+  }
+}
+
 /** Providers that run a local CLI subprocess instead of an HTTP endpoint. */
 function isSubprocessProvider(): boolean {
   return apiType() === "codex-app-server" || apiType() === "claude-code";
