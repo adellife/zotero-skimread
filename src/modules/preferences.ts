@@ -95,30 +95,41 @@ export function onPrefsLoad(window: Window) {
   // The `preference` attribute does not bind these elements in this pane (the
   // provider menulist above is wired by hand for the same reason), so a select
   // left to it silently neither loads its stored value nor saves a change.
+  /** Append a XUL menuitem to a menulist's popup. */
+  const addMenuItem = (list: Element, value: string, label: string) => {
+    const popup =
+      list.querySelector("menupopup") ??
+      list.appendChild(
+        (
+          doc as unknown as { createXULElement(t: string): Element }
+        ).createXULElement("menupopup"),
+      );
+    const item = (
+      doc as unknown as { createXULElement(t: string): Element }
+    ).createXULElement("menuitem");
+    item.setAttribute("value", value);
+    item.setAttribute("label", label);
+    popup.appendChild(item);
+    return item;
+  };
+
   const bindSelect = (
     id: string,
     pref: "claudeModel" | "codexModel" | "codexReasoning",
     fallback: string,
   ) => {
-    const el = $(id) as (HTMLSelectElement & { value: string }) | null;
+    const el = $(id) as (Element & { value: string }) | null;
     if (!el) return null;
     const stored = String(getPref(pref) || fallback);
     // Keep a stored value that is not among the offered options (a full model
     // ID, or one from a newer CLI) selectable instead of silently rewriting it.
-    const options = Array.from(
-      el.querySelectorAll("option"),
-    ) as HTMLOptionElement[];
-    if (!options.some((o) => o.value === stored)) {
-      const opt = doc.createElementNS(
-        "http://www.w3.org/1999/xhtml",
-        "option",
-      ) as HTMLOptionElement;
-      opt.value = stored;
-      opt.textContent = stored;
-      el.appendChild(opt);
-    }
+    const values = (
+      Array.from(el.querySelectorAll("menuitem")) as Element[]
+    ).map((m) => m.getAttribute("value"));
+    if (!values.includes(stored)) addMenuItem(el, stored, stored);
     el.value = stored;
     const save = () => setPref(pref, el.value);
+    // XUL menulists emit `command`; `change` is kept as a harmless fallback.
     el.addEventListener("command", save);
     el.addEventListener("change", save);
     return el;
@@ -145,15 +156,10 @@ export function onPrefsLoad(window: Window) {
         return;
       }
       const current = codexModelSel.value;
-      codexModelSel.textContent = "";
+      const popup = codexModelSel.querySelector("menupopup");
+      if (popup) popup.textContent = "";
       for (const model of status.models) {
-        const opt = doc.createElementNS(
-          "http://www.w3.org/1999/xhtml",
-          "option",
-        ) as HTMLOptionElement;
-        opt.value = model;
-        opt.textContent = model;
-        codexModelSel.appendChild(opt);
+        addMenuItem(codexModelSel, model, model);
       }
       // Preserve the current choice when the server still offers it.
       codexModelSel.value = status.models.includes(current)

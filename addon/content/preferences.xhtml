@@ -60,10 +60,12 @@
         <html:label for="zotero-prefpane-__addonRef__-codexModel"
           >Codex model</html:label
         >
-        <html:select
+        <menulist
           id="zotero-prefpane-__addonRef__-codexModel"
           style="width: 220px"
-        ></html:select>
+        >
+          <menupopup />
+        </menulist>
         <button
           id="zotero-prefpane-__addonRef__-codex-refresh-models"
           label="Refresh"
@@ -73,11 +75,13 @@
         <html:label for="zotero-prefpane-__addonRef__-codexReasoning"
           >Codex reasoning</html:label
         >
-        <html:select id="zotero-prefpane-__addonRef__-codexReasoning">
-          <html:option value="low">Low</html:option>
-          <html:option value="medium">Medium</html:option>
-          <html:option value="high">High</html:option>
-        </html:select>
+        <menulist id="zotero-prefpane-__addonRef__-codexReasoning">
+          <menupopup>
+            <menuitem label="Low" value="low" />
+            <menuitem label="Medium" value="medium" />
+            <menuitem label="High" value="high" />
+          </menupopup>
+        </menulist>
       </hbox>
       <hbox align="center">
         <html:label for="zotero-prefpane-__addonRef__-codexPath"
@@ -103,16 +107,16 @@
         <html:label for="zotero-prefpane-__addonRef__-claudeModel"
           >Claude model</html:label
         >
-        <html:select
+        <menulist
           id="zotero-prefpane-__addonRef__-claudeModel"
           style="width: 220px"
         >
-          <html:option value="sonnet"
-            >Sonnet (balanced, recommended)</html:option
-          >
-          <html:option value="haiku">Haiku (fastest, cheapest)</html:option>
-          <html:option value="opus">Opus (most capable, slowest)</html:option>
-        </html:select>
+          <menupopup>
+            <menuitem label="Sonnet (balanced, recommended)" value="sonnet" />
+            <menuitem label="Haiku (fastest, cheapest)" value="haiku" />
+            <menuitem label="Opus (most capable, slowest)" value="opus" />
+          </menupopup>
+        </menulist>
       </hbox>
       <hbox align="center">
         <html:label for="zotero-prefpane-__addonRef__-claudePath"
