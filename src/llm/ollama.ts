@@ -155,34 +155,43 @@ export function modelForProvider(configuredModel: string): string {
 }
 
 /**
- * Parse JSON that a model may have wrapped in prose, code fences, or trailing
- * text. Tries a strict parse first, then extracts the first balanced JSON
- * object/array (string- and escape-aware) and parses that.
+ * Remove reasoning blocks. Thinking models (Qwen3, R1 distills, and anything
+ * with `<think>` in its chat template) emit their reasoning before the answer,
+ * and that reasoning frequently contains braces — often a draft of the very
+ * JSON being asked for. Left in place it derails brace-matched extraction.
+ */
+export function stripThinking(raw: string): string {
+  let out = raw.replace(/<(think|thinking|reasoning)>[\s\S]*?<\/\1>/gi, " ");
+  // A stray closer means the opener was never emitted (some servers strip it):
+  // whatever follows the last closer is the answer.
+  const lastClose = out.toLowerCase().lastIndexOf("</think>");
+  if (lastClose >= 0) out = out.slice(lastClose + "</think>".length);
+  return out.trim();
+}
+
+/**
+ * Parse JSON a model may have wrapped in reasoning, prose, or code fences.
+ * Strips thinking, tries a strict parse, then falls back to balanced-brace
+ * extraction (string- and escape-aware), preferring the last valid candidate.
  */
 export function parseLooseJSON(raw: string): unknown {
-  const trimmed = raw.trim();
+  const trimmed = stripThinking(raw);
   try {
     return JSON.parse(trimmed);
   } catch {
     // fall through to tolerant extraction
   }
-  const objAt = trimmed.indexOf("{");
-  const arrAt = trimmed.indexOf("[");
+  // Collect every balanced top-level candidate, then prefer the LAST one that
+  // parses. Reasoning that survived stripping tends to precede the real answer,
+  // and a model that drafts JSON while thinking would otherwise win.
+  const candidates: string[] = [];
   let start = -1;
   let open = "{";
   let close = "}";
-  if (objAt >= 0 && (arrAt < 0 || objAt < arrAt)) {
-    start = objAt;
-  } else if (arrAt >= 0) {
-    start = arrAt;
-    open = "[";
-    close = "]";
-  }
-  if (start < 0) throw new Error("No JSON found in the model response");
   let depth = 0;
   let inString = false;
   let escaped = false;
-  for (let i = start; i < trimmed.length; i++) {
+  for (let i = 0; i < trimmed.length; i++) {
     const ch = trimmed[i];
     if (inString) {
       if (escaped) escaped = false;
@@ -190,14 +199,46 @@ export function parseLooseJSON(raw: string): unknown {
       else if (ch === '"') inString = false;
       continue;
     }
-    if (ch === '"') inString = true;
-    else if (ch === open) depth++;
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (start < 0) {
+      if (ch === "{" || ch === "[") {
+        start = i;
+        open = ch;
+        close = ch === "{" ? "}" : "]";
+        depth = 1;
+      }
+      continue;
+    }
+    if (ch === open) depth++;
     else if (ch === close) {
       depth--;
-      if (depth === 0) return JSON.parse(trimmed.slice(start, i + 1));
+      if (depth === 0) {
+        candidates.push(trimmed.slice(start, i + 1));
+        start = -1;
+      }
     }
   }
-  throw new Error("Incomplete JSON in the model response");
+  if (!candidates.length) {
+    throw new Error(
+      start >= 0
+        ? "Incomplete JSON in the model response"
+        : "No JSON found in the model response",
+    );
+  }
+  let lastError: unknown = null;
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    try {
+      return JSON.parse(candidates[i]);
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("No parsable JSON in the model response");
 }
 
 interface CodexPipe {
@@ -822,6 +863,10 @@ export async function chatJSON(opts: {
             stream: false,
             format: opts.schema,
             keep_alive: "30m",
+            // Reasoning buys nothing here (the task is "return these ids as
+            // JSON") while costing latency and, on small models, correctness.
+            // Ignored by models without a thinking mode, and by older Ollama.
+            think: false,
             options: { temperature: opts.temperature ?? 0, num_ctx: numCtx },
             messages,
           },
