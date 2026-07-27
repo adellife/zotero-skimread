@@ -180,7 +180,14 @@ export async function extractPage(
       const cur = chars[i];
       const newLine =
         Math.abs(cur.baseline - prev.baseline) > prev.fontSize * 0.5;
-      const gap = cur.rect[0] - prev.rect[2];
+      // Distance between the two glyph boxes, whichever side the next one sits
+      // on. Right-to-left scripts (Arabic, Persian, Hebrew) advance leftwards,
+      // so measuring only cur.left - prev.right is always negative there and no
+      // space is ever synthesised, gluing every word of the page together.
+      const gap = Math.max(
+        cur.rect[0] - prev.rect[2],
+        prev.rect[0] - cur.rect[2],
+      );
       const space = !newLine && gap > prev.fontSize * 0.18;
       if (newLine || space) {
         text += " ";

@@ -502,6 +502,23 @@ function segmentSentences(
 // Multilingual (EN/FR/ES/DE/IT) heading markers. Only "references" causes text
 // to be dropped, so it is kept tight; the others are context hints and can be
 // liberal without harm.
+// Right-to-left headings (Persian, Arabic) need their own entries: JS \b is
+// defined over [A-Za-z0-9_], so it never matches at an Arabic-script boundary
+// and every \b-anchored pattern above silently fails on these documents.
+const RTL_SECTION_MARKERS: [RegExp, DocumentSection][] = [
+  [
+    /(?:منابع|مراجع|مآخذ|ك?کتاب\s*نامه|فهرست\s*(?:منابع|مراجع)|المصادر|المراجع)/,
+    "references",
+  ],
+  [/(?:پیوست|ضمیمه|پيوست|الملاحق|الملحق)/, "appendix"],
+  [/(?:چکیده|چكيده|الملخص|ملخص)/, "abstract"],
+  [/(?:مقدمه|درآمد|المقدمة)/, "introduction"],
+  [/(?:روش\s*(?:شناسی|شناسي|تحقیق|پژوهش)?|المنهجية|منهج\s*البحث)/, "methods"],
+  [/(?:یافته\s*ها|يافته\s*ها|نتایج|نتايج|النتائج)/, "results"],
+  [/(?:بحث\s*و\s*بررسی|بحث|المناقشة)/, "discussion"],
+  [/(?:نتیجه\s*گیری|نتيجه\s*گيري|جمع\s*بندی|الخاتمة|الاستنتاج)/, "conclusion"],
+];
+
 const SECTION_MARKERS: [RegExp, DocumentSection][] = [
   [
     /\b(?:references|bibliography|works cited|literature cited|cited literature|reference list|r[ée]f[ée]rences?|bibliographie|ouvrages cit[ée]s|litt[ée]rature cit[ée]e|bibliograf(?:y|ía|ia)|referencias|literaturverzeichnis|riferimenti bibliografici)\b/i,
@@ -546,6 +563,12 @@ function sectionAtPageStart(page: PageText): DocumentSection | null {
   const lead = page.text.slice(0, 160);
   for (const [marker, section] of SECTION_MARKERS) {
     if (marker.test(lead)) return section;
+  }
+  // Only worth scanning when the page actually contains Arabic-script text.
+  if (/[؀-ۿ]/.test(lead)) {
+    for (const [marker, section] of RTL_SECTION_MARKERS) {
+      if (marker.test(lead)) return section;
+    }
   }
   return null;
 }
