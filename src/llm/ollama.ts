@@ -54,6 +54,7 @@ export function providerDisplayName(): string {
   const type = apiType();
   if (type !== "openai-compatible") return providerLabel();
   const url = baseUrl(true).toLowerCase();
+  if (knownOllama()) return "Ollama";
   if (url.includes(":11434")) return "Ollama";
   if (url.includes("api.openai.com")) return "OpenAI";
   if (url.includes("api.anthropic.com")) return "Anthropic";
@@ -73,8 +74,8 @@ export function connectionHint(): string {
     case "claude-code":
       return 'run "claude login", then check the CLI path in Settings';
     default:
-      return baseUrl(true).includes(":11434")
-        ? 'start it with "ollama serve"'
+      return knownOllama() || baseUrl(true).includes(":11434")
+        ? 'start it with "ollama serve", or check the SSH tunnel if it is remote'
         : "check the server URL in Settings";
   }
 }
@@ -103,16 +104,42 @@ function ollamaNumCtx(): number {
 }
 
 /**
- * Whether the configured endpoint is Ollama, by its default port.
+ * Whether the configured endpoint is Ollama, probed once per URL.
  *
  * This matters because Ollama's OpenAI-compatible endpoint accepts neither
  * `think` nor `num_ctx`, while its native /api/chat accepts both. A reasoning
  * model reached over the compatible endpoint spends thousands of tokens
  * thinking on every call (measured: 1242 output tokens to answer `{"ok":1}`,
  * versus 12 with think disabled), which makes small models look hung.
+ *
+ * Probed rather than assumed from the port: an SSH tunnel to a remote Ollama
+ * commonly lands on some other local port, and a port guess would quietly send
+ * those users back to the slow path.
  */
-function isOllamaEndpoint(): boolean {
-  return baseUrl(true).includes(":11434");
+let ollamaProbe: { url: string; isOllama: boolean } | null = null;
+
+async function detectOllama(): Promise<boolean> {
+  const url = baseUrl(true);
+  if (ollamaProbe?.url === url) return ollamaProbe.isOllama;
+  let isOllama = false;
+  try {
+    const info = (await request("GET", "/api/version", undefined, {
+      native: true,
+      timeout: 6000,
+    })) as { version?: unknown };
+    isOllama = typeof info?.version === "string";
+  } catch {
+    isOllama = false; // not Ollama, or not reachable; either way use /v1
+  }
+  ollamaProbe = { url, isOllama };
+  return isOllama;
+}
+
+/** Last probe result for display purposes; null when never probed. */
+function knownOllama(): boolean | null {
+  return ollamaProbe && ollamaProbe.url === baseUrl(true)
+    ? ollamaProbe.isOllama
+    : null;
 }
 
 function isLocalHost(url: string): boolean {
@@ -787,6 +814,9 @@ export async function checkStatus(): Promise<OllamaStatus> {
         };
       }
       default: {
+        // Warm the Ollama probe here so the status line and hints can name the
+        // endpoint correctly before any generation has run.
+        await detectOllama();
         // OpenAI-compatible /models works for Ollama, vLLM, OpenAI, OpenRouter,
         // etc. Anthropic's compat endpoint also exposes it.
         const response = (await request("GET", "/models", undefined, {
@@ -865,7 +895,7 @@ export async function chatJSON(opts: {
       return claudeCodeJSON(opts);
     default: {
       const numCtx = ollamaNumCtx();
-      if (numCtx > 0 || isOllamaEndpoint()) {
+      if (numCtx > 0 || (await detectOllama())) {
         // Native Ollama endpoint. The only way to set the context window, and
         // the only way to turn off a reasoning model's thinking; the
         // OpenAI-compatible endpoint silently ignores both.
