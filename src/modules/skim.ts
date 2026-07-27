@@ -61,6 +61,7 @@ import {
 } from "../reader/adapter";
 import { extractEpubSections } from "../reader/epub";
 import { saveEpubHighlights, saveNativeHighlights } from "./annotations";
+import { analyzeZones, overlapsFurniture, refSignalScore } from "./zoning";
 
 /** Reader document type. EPUBs use a text-only (no-overlay) path. */
 function isEpub(reader: any): boolean {
@@ -1425,6 +1426,8 @@ export async function runSkim(
     // ---- extract (needed both for fresh runs and to resume partial ones) ----
     const pages: PageText[] = [];
     let sentences: ExtractedSentence[] = [];
+    // First page of the statistically detected reference zone (-1 = none).
+    let referenceStartPage = -1;
     if (payload.extractComplete && payload.extracted?.length) {
       // Already read this document in an earlier (paused) run — skip straight
       // to selection. Page geometry is re-read lazily by the overlay painter.
@@ -1451,10 +1454,42 @@ export async function runSkim(
         if (!page) continue;
         pages.push(page);
         job.pageCache.set(p, page);
+      }
+      // Zoning needs the whole document (furniture is defined by cross-page
+      // repetition), so it runs between extraction and segmentation.
+      const zones = analyzeZones(pages);
+      if (zones.furnitureLineCount || zones.referenceStartPage >= 0) {
+        const parts: string[] = [];
+        if (zones.furnitureLineCount) {
+          parts.push(
+            `${zones.furnitureLineCount} repeated header/footer lines`,
+          );
+        }
+        if (zones.referenceStartPage >= 0) {
+          parts.push(`references from page ${zones.referenceStartPage + 1}`);
+        }
+        cb.onStatus(`Zoning: ${parts.join(", ")}`);
+      }
+      for (const page of pages) {
         for (const sent of segmentSentences(page)) {
-          sentences.push({ pageIndex: p, section: "body", ...sent });
+          if (
+            overlapsFurniture(
+              zones,
+              page.pageIndex,
+              sent.startChar,
+              sent.endChar,
+            )
+          ) {
+            continue; // running header/footer, not content
+          }
+          sentences.push({
+            pageIndex: page.pageIndex,
+            section: "body",
+            ...sent,
+          });
         }
       }
+      referenceStartPage = zones.referenceStartPage;
     }
     if (!sentences.length) {
       cb.onError(
@@ -1467,9 +1502,24 @@ export async function runSkim(
     // EPUBs already have chapter sections; PDFs infer sections from headings.
     // Skipped when the sentences came back from cache already processed.
     if (!payload.extractComplete) {
-      sentences = isEpub(reader)
-        ? sentences
-        : limitWork(withDocumentSections(pages, sentences));
+      if (!isEpub(reader)) {
+        sentences = withDocumentSections(pages, sentences);
+        // Zone override AFTER heading inference, so it cannot be overwritten:
+        // the statistically detected bibliography is references whether or not
+        // any heading (in any language) was recognised.
+        if (referenceStartPage >= 0) {
+          for (const s of sentences) {
+            if (
+              s.pageIndex > referenceStartPage ||
+              (s.pageIndex === referenceStartPage &&
+                refSignalScore(s.text) >= 1)
+            ) {
+              s.section = "references";
+            }
+          }
+        }
+        sentences = limitWork(sentences);
+      }
       // Persist immediately: reading the document is the slow, token-free part,
       // and no later pause should ever make the user pay for it twice.
       payload.extracted = sentences;
