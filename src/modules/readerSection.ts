@@ -202,19 +202,6 @@ function renderPanel(body: HTMLElement) {
   modeRow.append(modeLab, select);
   wrap.append(modeRow);
 
-  // balanced coverage toggle (hierarchical map-reduce selection)
-  const balRow = doc.createElement("label");
-  balRow.style.cssText =
-    "display:flex;align-items:center;gap:6px;font-size:12px;";
-  const balCb = doc.createElement("input");
-  balCb.type = "checkbox";
-  balCb.checked = getPref("balancedCoverage") !== false;
-  balCb.addEventListener("change", () =>
-    setPref("balancedCoverage", balCb.checked),
-  );
-  balRow.append(balCb, doc.createTextNode(getString("control-balanced")));
-  wrap.append(balRow);
-
   // action buttons
   const btnRow = doc.createElement("div");
   btnRow.style.cssText = "display:flex;gap:6px;";

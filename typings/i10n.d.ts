@@ -13,7 +13,6 @@ export type FluentMessageId =
   | 'btn-tldr'
   | 'btn-tldr-note'
   | 'btn-tldr-refresh'
-  | 'control-balanced'
   | 'control-citecards'
   | 'control-density'
   | 'control-flags'

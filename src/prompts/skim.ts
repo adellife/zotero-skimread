@@ -2,7 +2,7 @@
  * Versioned prompts for skim classification with dynamic label sets.
  * Bump PROMPT_VERSION whenever any prompt text changes (invalidates cache).
  */
-export const PROMPT_VERSION = 17;
+export const PROMPT_VERSION = 18;
 
 export interface LabelDef {
   key: string; // stable slug, e.g. "theory"

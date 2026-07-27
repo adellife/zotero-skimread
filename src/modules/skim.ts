@@ -1559,20 +1559,19 @@ export async function runSkim(
     if (!adaptiveAuto) cb.onLabels?.(labels);
 
     // ---- document selection ----
-    // "balanced": hierarchical map-reduce — split into contiguous bands and
-    // select a fixed budget from each, guaranteeing coverage across the whole
-    // document. Otherwise: single-pass whole-document (or context-sized chunk)
-    // selection, which is faster but can concentrate highlights.
+    // Focused papers use one complete-document selection whenever they fit the
+    // configured context. Long documents are split at section/page boundaries;
+    // book-like documents keep adaptive bands so their labels can evolve with
+    // each chapter's distinct objective.
     const budget = payload.chunkBudget ?? selectionBudget();
     payload.chunkBudget = budget;
     const isCancelled = () => job.cancelled || !isReaderAlive(reader);
-    const balanced = getPref("balancedCoverage") !== false;
 
     const pageSpan =
       sentences.reduce((max, s) => Math.max(max, s.pageIndex), 0) + 1;
     payload.pageSpan = pageSpan;
     // Adaptive auto must run per band so labels can evolve section by section.
-    const useBands = balanced || adaptiveAuto;
+    const useBands = adaptiveAuto;
     let units: ExtractedSentence[][];
     let perUnitTarget = 0;
     if (useBands) {

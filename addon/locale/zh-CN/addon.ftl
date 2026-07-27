@@ -40,4 +40,3 @@ progress-tldr = Generating TL;DR…
 progress-tldr-note-saved = TL;DR saved as a Zotero note
 progress-tldr-none = Generate a TL;DR first
 control-tldr-with = Also make TL;DR when generating highlights (same model)
-control-balanced = Balanced coverage (spread highlights across the whole paper)
