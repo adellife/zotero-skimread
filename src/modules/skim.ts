@@ -414,6 +414,27 @@ function bylineTrimOffset(text: string): number {
   return end + (lead ? lead[0].length : 0);
 }
 
+// A section heading carries no terminal punctuation, so the segmenter fuses it
+// to the sentence that follows: "Results Across all metrics…". Such a span reads
+// like a section summary and is picked far more often than it deserves —
+// measured on one paper, 5 of 6 such candidates were selected, 14x their share
+// of the pool — spending the highlight budget on signposts instead of claims.
+// Case-sensitive on purpose: headings are capitalised, and the [A-Z] guards
+// below stop working under /i (which makes [A-Z] match lowercase too).
+const LEADING_HEADING =
+  /^(?:Phase\s*\d+\s*[:.]?|(?:Results?|Methods?|Methodology|Findings?|Discussion|Conclusions?|Introduction|Background|Abstract|Limitations?)(?:\s+(?:for|of|to|in)\s+(?:the\s+)?[A-Z][\w-]*(?:\s+[A-Z][\w-]*){0,2})?)\s*[:.]?\s+(?=[A-Z])/;
+
+/** Length of a section heading fused to the start of this span, else 0. */
+function headingTrimOffset(text: string): number {
+  const m = LEADING_HEADING.exec(text);
+  if (!m) return 0;
+  // "Results show that…" is a real sentence, not a heading: require what
+  // follows to begin a new sentence rather than continue this one.
+  const rest = text.slice(m[0].length);
+  if (!/^[A-Z]/.test(rest)) return 0;
+  return m[0].length;
+}
+
 function pushSpan(
   page: PageText,
   out: Omit<ExtractedSentence, "pageIndex" | "section">[],
@@ -426,18 +447,29 @@ function pushSpan(
   if (text.length < MIN_LEN || !/[a-zA-Z]{3}/.test(text)) return;
   // Title pages only: elsewhere a leading capitalised-name-plus-digits run is
   // far more likely to be prose than a byline.
+  let removedFront = 0;
   if (page.pageIndex === 0) {
     const skip = bylineTrimOffset(text);
     if (skip > 0) {
       const kept = text.slice(skip).trimStart();
       // If nothing substantial follows, the span was byline all the way down.
       if (kept.length < MIN_LEN) return;
-      // Advance the text offset by exactly what was removed, so the char range
-      // (and therefore the painted rectangle) starts at the prose.
-      startText += leadingWs + (text.length - kept.length);
+      removedFront += text.length - kept.length;
       text = kept;
     }
   }
+  // Section headings fuse to the following sentence anywhere in the document.
+  const headSkip = headingTrimOffset(text);
+  if (headSkip > 0) {
+    const kept = text.slice(headSkip).trimStart();
+    if (kept.length >= MIN_LEN) {
+      removedFront += text.length - kept.length;
+      text = kept;
+    }
+  }
+  // Advance the text offset by exactly what was removed, so the char range
+  // (and therefore the painted rectangle) starts at the prose.
+  if (removedFront > 0) startText += leadingWs + removedFront;
   let startChar = -1;
   let endChar = -1;
   for (let i = startText; i < endText && i < page.charMap.length; i++) {
