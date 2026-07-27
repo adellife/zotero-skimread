@@ -876,7 +876,10 @@ export async function chatJSON(opts: {
             model: opts.model,
             stream: false,
             format: opts.schema,
-            keep_alive: "30m",
+            // Ollama's own default. Holding a model for half an hour pins its
+            // memory, which on a machine that can only fit one model at a time
+            // blocks the next one from loading when the user switches.
+            keep_alive: "5m",
             // Reasoning buys nothing here (the task is "return these ids as
             // JSON") while costing latency and, on small models, correctness.
             // Ignored by models without a thinking mode, and by older Ollama.
