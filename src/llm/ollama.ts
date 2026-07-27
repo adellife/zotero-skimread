@@ -102,6 +102,19 @@ function ollamaNumCtx(): number {
   return Math.max(0, Math.floor(Number(getPref("ollamaNumCtx")) || 0));
 }
 
+/**
+ * Whether the configured endpoint is Ollama, by its default port.
+ *
+ * This matters because Ollama's OpenAI-compatible endpoint accepts neither
+ * `think` nor `num_ctx`, while its native /api/chat accepts both. A reasoning
+ * model reached over the compatible endpoint spends thousands of tokens
+ * thinking on every call (measured: 1242 output tokens to answer `{"ok":1}`,
+ * versus 12 with think disabled), which makes small models look hung.
+ */
+function isOllamaEndpoint(): boolean {
+  return baseUrl(true).includes(":11434");
+}
+
 function isLocalHost(url: string): boolean {
   const host = url.replace(/^https?:\/\//, "").split(/[/:]/)[0];
   return ["localhost", "127.0.0.1", "[::1]", "::1"].includes(host);
@@ -852,9 +865,10 @@ export async function chatJSON(opts: {
       return claudeCodeJSON(opts);
     default: {
       const numCtx = ollamaNumCtx();
-      if (numCtx > 0) {
-        // Native Ollama endpoint — the only way to set the context window.
-        // (The OpenAI-compatible endpoint silently ignores num_ctx.)
+      if (numCtx > 0 || isOllamaEndpoint()) {
+        // Native Ollama endpoint. The only way to set the context window, and
+        // the only way to turn off a reasoning model's thinking; the
+        // OpenAI-compatible endpoint silently ignores both.
         const response = (await request(
           "POST",
           "/api/chat",
@@ -867,7 +881,12 @@ export async function chatJSON(opts: {
             // JSON") while costing latency and, on small models, correctness.
             // Ignored by models without a thinking mode, and by older Ollama.
             think: false,
-            options: { temperature: opts.temperature ?? 0, num_ctx: numCtx },
+            // Only pin the context window when the user set one; sending
+            // num_ctx: 0 would ask for a zero-length context.
+            options: {
+              temperature: opts.temperature ?? 0,
+              ...(numCtx > 0 ? { num_ctx: numCtx } : {}),
+            },
             messages,
           },
           { native: true },
