@@ -11,6 +11,7 @@ import {
   checkStatus,
   connectionHint,
   missingModels,
+  modelForProvider,
   providerDisplayName,
 } from "../llm/ollama";
 import {
@@ -45,6 +46,12 @@ const MODES: { value: LabelMode; label: string }[] = [
   { value: "custom", label: "Custom (edit in Settings)" },
   { value: "auto", label: "Auto-discover from document" },
 ];
+
+function smallModelWarning(): boolean {
+  const model = modelForProvider(String(getPref("skimModel"))).toLowerCase();
+  const match = /(?:^|[^0-9])(\d+(?:\.\d+)?)b(?:$|[^a-z0-9])/i.exec(model);
+  return !!match && Number(match[1]) <= 3;
+}
 
 // Open panel bodies, so a settings change can refresh their status line. The
 // prefs window is separate from the reader, so nothing re-renders the panel on
@@ -338,15 +345,31 @@ function renderPanel(body: HTMLElement) {
   flagRow.append(flagCb, doc.createTextNode(getString("control-flags")));
   wrap.append(flagRow);
 
+  const highlightViewRow = doc.createElement("div");
+  highlightViewRow.style.cssText =
+    "display:flex;flex-direction:column;gap:2px;font-size:12px;";
+  const highlightViewLabel = doc.createElement("span");
+  highlightViewLabel.textContent = getString("control-highlight-view");
+  const highlightView = doc.createElement("select");
+  highlightView.style.cssText = "font-size:12px;";
+  for (const [value, label] of [
+    ["core", getString("option-core")],
+    ["context", getString("option-context")],
+  ]) {
+    const option = doc.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    highlightView.append(option);
+  }
+  highlightView.value =
+    String(getPref("highlightView")) === "context" ? "context" : "core";
+  highlightView.addEventListener("change", () => {
+    setPref("highlightView", highlightView.value);
+    repaintFromCacheIfAny(body);
+  });
+  highlightViewRow.append(highlightViewLabel, highlightView);
   wrap.append(
-    makeSlider(
-      doc,
-      getString("control-density"),
-      "highlightDensity",
-      1,
-      10,
-      body,
-    ),
+    highlightViewRow,
     makeSlider(
       doc,
       getString("control-opacity"),
@@ -356,6 +379,13 @@ function renderPanel(body: HTMLElement) {
       body,
     ),
   );
+  if (smallModelWarning()) {
+    const warning = doc.createElement("div");
+    warning.textContent = getString("warning-small-model");
+    warning.style.cssText =
+      "font-size:11px;line-height:1.35;color:#b05a00;background:rgba(255,160,0,.1);padding:5px;border-radius:4px;";
+    wrap.append(warning);
+  }
 
   // EPUB highlight list (populated on async render / after a run).
   const hlList = doc.createElement("div");
@@ -734,7 +764,7 @@ async function refreshButtons(body: HTMLElement) {
 function makeSlider(
   doc: Document,
   label: string,
-  pref: "highlightDensity" | "highlightOpacity",
+  pref: "highlightOpacity",
   min: number,
   max: number,
   body: HTMLElement,

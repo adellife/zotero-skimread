@@ -970,7 +970,7 @@ export async function chatJSON(opts: {
 export function missingModels(status: OllamaStatus): string[] {
   // Subprocess providers manage their own models; nothing to check.
   if (isSubprocessProvider() || status.models.length === 0) return [];
-  const wanted = [String(getPref("skimModel")), String(getPref("tldrModel"))];
+  const wanted = [String(getPref("skimModel"))];
   return [...new Set(wanted)].filter(
     (wantedModel) =>
       wantedModel &&

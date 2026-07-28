@@ -62,6 +62,45 @@ function applyFlagScale(flag: any, rawScale: number, colorRGB: string): void {
   flag.style.borderRadius = `${px(2)} 0 0 ${px(2)}`;
 }
 
+/**
+ * Keep a flag wholly inside the whitespace before a text column. Long custom
+ * labels are clipped rather than allowed to cover the paper.
+ */
+export function marginFlagLayout(
+  textLeft: number,
+  naturalWidth: number,
+): { left: number; maxWidth: number } {
+  const pageInset = 2;
+  const textGap = 4;
+  const boundary = Math.max(pageInset + textGap + 1, textLeft);
+  const maxWidth = Math.max(1, boundary - textGap - pageInset);
+  const width = Math.min(Math.max(1, naturalWidth), maxWidth);
+  return {
+    left: Math.max(pageInset, boundary - textGap - width),
+    maxWidth,
+  };
+}
+
+/**
+ * Margin flags are intentionally narrow badges. The full label remains in the
+ * sidebar and accessibility text; the badge never expands over PDF prose.
+ */
+export function abbreviateFlagLabel(label: string): string {
+  const words = String(label || "")
+    .trim()
+    .split(/[\s_-]+/)
+    .filter(Boolean);
+  if (!words.length) return "";
+  if (words.length > 1) {
+    return words
+      .slice(0, 3)
+      .map((word) => word.charAt(0))
+      .join("")
+      .toUpperCase();
+  }
+  return words[0].slice(0, 2).toUpperCase();
+}
+
 /** Resolve the reader shown in the given main-window tab. */
 export function getReaderForTab(tabID: string): any | null {
   return Zotero.Reader.getByTabID(tabID) || null;
@@ -110,6 +149,382 @@ function getHandle(reader: any): ReaderHandle | null {
 
 export function getPageCount(reader: any): number {
   return getHandle(reader)?.app?.pagesCount ?? 0;
+}
+
+export interface PageStructureHints {
+  title?: string;
+  creators?: string[];
+}
+
+interface VisualLine {
+  chars: PageChar[];
+  text: string;
+  baseline: number;
+  fontSize: number;
+  x1: number;
+  x2: number;
+}
+
+function median(values: number[]): number {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+function lineText(chars: PageChar[]): string {
+  let text = "";
+  for (let i = 0; i < chars.length; i++) {
+    if (i) {
+      const prev = chars[i - 1];
+      const cur = chars[i];
+      const gap = Math.max(
+        cur.rect[0] - prev.rect[2],
+        prev.rect[0] - cur.rect[2],
+      );
+      if (gap > prev.fontSize * 0.18) text += " ";
+    }
+    text += chars[i].c;
+  }
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function describeVisualLine(chars: PageChar[]): VisualLine {
+  const ordered = [...chars].sort(
+    (a, b) => a.rect[0] - b.rect[0] || b.rect[2] - a.rect[2],
+  );
+  return {
+    chars: ordered,
+    text: lineText(ordered),
+    baseline: median(ordered.map((char) => char.baseline)),
+    fontSize: median(ordered.map((char) => char.fontSize)),
+    x1: Math.min(...ordered.map((char) => char.rect[0])),
+    x2: Math.max(...ordered.map((char) => char.rect[2])),
+  };
+}
+
+/**
+ * Cluster characters by geometry instead of trusting PDF object order. Some
+ * publishers interleave left- and right-column objects row by row; treating
+ * that stream as prose fuses keywords or affiliations into the abstract.
+ */
+function visualLines(chars: PageChar[], pageWidth: number): VisualLine[] {
+  const clusters: Array<{
+    chars: PageChar[];
+    baseline: number;
+    fontSize: number;
+  }> = [];
+  const sorted = [...chars].sort(
+    (a, b) => b.baseline - a.baseline || a.rect[0] - b.rect[0],
+  );
+  for (const char of sorted) {
+    let best = -1;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < clusters.length; index++) {
+      const line = clusters[index];
+      const distance = Math.abs(char.baseline - line.baseline);
+      const tolerance = Math.max(
+        1,
+        Math.min(char.fontSize || 10, line.fontSize || 10) * 0.48,
+      );
+      if (distance <= tolerance && distance < bestDistance) {
+        best = index;
+        bestDistance = distance;
+      }
+    }
+    if (best >= 0) {
+      const cluster = clusters[best];
+      const count = cluster.chars.length;
+      cluster.chars.push(char);
+      cluster.baseline =
+        (cluster.baseline * count + char.baseline) / (count + 1);
+      cluster.fontSize =
+        (cluster.fontSize * count + char.fontSize) / (count + 1);
+    } else {
+      clusters.push({
+        chars: [char],
+        baseline: char.baseline,
+        fontSize: char.fontSize,
+      });
+    }
+  }
+
+  const lines = clusters.map((cluster) => describeVisualLine(cluster.chars));
+  if (pageWidth <= 0) return lines;
+
+  // Detect a repeated gutter. First-page abstract layouts are often asymmetric
+  // (a narrow keyword rail beside a wide abstract), so the gutter must be
+  // inferred from repeated aligned gaps rather than assumed to sit at 50%.
+  const threshold = Math.max(12, pageWidth * 0.018);
+  const candidates: Array<{
+    line: VisualLine;
+    index: number;
+    center: number;
+    width: number;
+  }> = [];
+  for (const line of lines) {
+    const gaps = line.chars
+      .slice(1)
+      .map((char, index) => ({
+        index: index + 1,
+        width: char.rect[0] - line.chars[index].rect[2],
+        center: (char.rect[0] + line.chars[index].rect[2]) / 2,
+      }))
+      .filter(
+        (gap) =>
+          gap.width >= threshold &&
+          gap.center >= pageWidth * 0.12 &&
+          gap.center <= pageWidth * 0.88 &&
+          gap.index >= 4 &&
+          line.chars.length - gap.index >= 4,
+      )
+      .sort((a, b) => b.width - a.width);
+    for (const gap of gaps) candidates.push({ line, ...gap });
+  }
+  if (candidates.length < 2) return lines;
+
+  const centerTolerance = Math.max(12, pageWidth * 0.045);
+  const groups: (typeof candidates)[] = [];
+  for (const candidate of [...candidates].sort((a, b) => a.center - b.center)) {
+    const group = groups.find((entries) => {
+      const center =
+        entries.reduce((sum, entry) => sum + entry.center, 0) / entries.length;
+      return Math.abs(candidate.center - center) <= centerTolerance;
+    });
+    if (group) group.push(candidate);
+    else groups.push([candidate]);
+  }
+  const repeated = groups
+    .filter(
+      (group) => new Set(group.map((candidate) => candidate.line)).size >= 2,
+    )
+    .sort(
+      (a, b) =>
+        new Set(b.map((candidate) => candidate.line)).size -
+          new Set(a.map((candidate) => candidate.line)).size ||
+        b.reduce((sum, candidate) => sum + candidate.width, 0) -
+          a.reduce((sum, candidate) => sum + candidate.width, 0),
+    )[0];
+  if (!repeated) return lines;
+  const gutter = median(repeated.map((candidate) => candidate.center));
+  const splitLines: VisualLine[] = [];
+  for (const line of lines) {
+    const split = line.chars
+      .slice(1)
+      .map((char, index) => ({
+        index: index + 1,
+        width: char.rect[0] - line.chars[index].rect[2],
+        left: line.chars[index].rect[2],
+        right: char.rect[0],
+      }))
+      .filter(
+        (gap) =>
+          gap.width >= threshold &&
+          gap.left <= gutter &&
+          gap.right >= gutter &&
+          gap.index >= 4 &&
+          line.chars.length - gap.index >= 4,
+      )
+      .sort((a, b) => b.width - a.width)[0];
+    if (!split) {
+      splitLines.push(line);
+      continue;
+    }
+    splitLines.push(
+      describeVisualLine(line.chars.slice(0, split.index)),
+      describeVisualLine(line.chars.slice(split.index)),
+    );
+  }
+  return splitLines;
+}
+
+function normalized(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function bodyFontSize(chars: PageChar[]): number {
+  const counts = new Map<number, number>();
+  for (const char of chars) {
+    if (char.fontSize < 4) continue;
+    const size = Math.round(char.fontSize * 2) / 2;
+    counts.set(size, (counts.get(size) || 0) + Math.max(1, char.c.length));
+  }
+  let bestSize = 10;
+  let bestCount = 0;
+  for (const [size, count] of counts) {
+    if (count > bestCount) {
+      bestSize = size;
+      bestCount = count;
+    }
+  }
+  return bestSize;
+}
+
+function looksLikeHeading(text: string): boolean {
+  const words = text.match(/[A-Za-z][A-Za-z'’-]*/g) || [];
+  if (!words.length || words.length > 16 || /[.!?]\s*$/.test(text)) {
+    return false;
+  }
+  const numbered = /^\s*(?:\d+(?:\.\d+)*|[IVXLCDM]+)[.)-]?\s+/i.test(text);
+  const capitals = words.filter(
+    (word) => /^[A-Z]/.test(word) || word === word.toUpperCase(),
+  ).length;
+  return numbered || capitals / words.length >= 0.6;
+}
+
+function structureHintsForReader(reader: any): PageStructureHints {
+  try {
+    const attachment = Zotero.Items.get(reader.itemID);
+    const parent = attachment?.parentItem ?? attachment;
+    return {
+      title: String(parent?.getField("title") || ""),
+      creators: (parent?.getCreators?.() || []).map(
+        (creator: { firstName?: string; lastName?: string }) =>
+          [creator.firstName, creator.lastName].filter(Boolean).join(" "),
+      ),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function readingOrder(lines: VisualLine[], pageWidth: number): VisualLine[] {
+  if (!lines.length || pageWidth <= 0) return lines;
+  const midpoint = pageWidth / 2;
+  const narrow = lines.filter((line) => line.x2 - line.x1 < pageWidth * 0.58);
+  const left = narrow.filter((line) => (line.x1 + line.x2) / 2 < midpoint);
+  const right = narrow.filter((line) => (line.x1 + line.x2) / 2 >= midpoint);
+  const topDown = (a: VisualLine, b: VisualLine) =>
+    b.baseline - a.baseline || a.x1 - b.x1;
+  if (left.length < 3 || right.length < 3) {
+    return [...lines].sort(topDown);
+  }
+  const columnTop = Math.max(...narrow.map((line) => line.baseline));
+  const columnBottom = Math.min(...narrow.map((line) => line.baseline));
+  const spanning = lines.filter((line) => !narrow.includes(line));
+  const above = spanning.filter((line) => line.baseline > columnTop);
+  const below = spanning.filter((line) => line.baseline < columnBottom);
+  const within = spanning.filter(
+    (line) => line.baseline <= columnTop && line.baseline >= columnBottom,
+  );
+  // Spanning prose above two columns is commonly an abstract. A spanning line
+  // inside the column range is kept after the columns; headings have already
+  // been removed, so this is a conservative ordering for unusual layouts.
+  return [
+    ...above.sort(topDown),
+    ...left.sort(topDown),
+    ...right.sort(topDown),
+    ...within.sort(topDown),
+    ...below.sort(topDown),
+  ];
+}
+
+/**
+ * Convert filtered pdf.js characters into structural prose. This is exported
+ * for fixture tests: title/author/metadata decisions must be verified before
+ * an LLM ever sees a sentence.
+ */
+export function buildStructuredPage(
+  pageIndex: number,
+  chars: PageChar[],
+  pageWidth: number,
+  hints: PageStructureHints = {},
+): PageText {
+  const lines = visualLines(chars, pageWidth);
+  const bodySize = bodyFontSize(chars);
+  const title = normalized(hints.title || "");
+  const creators = (hints.creators || [])
+    .map(normalized)
+    .filter((creator) => creator.length >= 4);
+  let keywordColumn: "left" | "right" | null = null;
+  const eligible: VisualLine[] = [];
+  for (const line of lines) {
+    const text = line.text.trim();
+    const key = normalized(text);
+    if (!text || !key) continue;
+    const lineColumn =
+      (line.x1 + line.x2) / 2 < pageWidth / 2 ? "left" : "right";
+    const exactHeading = /^(?:abstract|keywords?|keyterms?|articleinfo)$/i.test(
+      key,
+    );
+    if (/^(?:keywords?|keyterms?)$/i.test(key)) {
+      keywordColumn = lineColumn;
+      continue;
+    }
+    if (
+      pageIndex === 0 &&
+      keywordColumn === lineColumn &&
+      line.x2 - line.x1 < pageWidth * 0.38 &&
+      !/[.!?]\s*$/.test(text)
+    ) {
+      continue;
+    }
+    const titleMatch =
+      pageIndex === 0 &&
+      key.length >= 6 &&
+      title.length >= 6 &&
+      (title.includes(key) || key.includes(title));
+    const creatorMatch =
+      pageIndex === 0 &&
+      creators.some(
+        (creator) => key.includes(creator) || creator.includes(key),
+      );
+    const lower = text.toLowerCase();
+    const metadataLine =
+      !/[.!?]\s*$/.test(text) &&
+      text.split(/\s+/).length <= 35 &&
+      /contents\s+lists?\s+available|science\s*direct|journal\s+homepage|facult|universit|department|institute|pavillon|rue\b|street\b|road\b|avenue\b|postal\b|québec|quebec|canada\b|article\s+info/i.test(
+        lower,
+      );
+    const metadata =
+      pageIndex === 0 &&
+      (/doi\s*:|doi\.org|creative\s*commons|copyright|article\s+reuse|journal|corresponding\s+author|e-?mail\s*:|university|issn|sagepub|open\s+access|special\s+issue|online\s+supplementary\s+material|version\s+in\s+\w+\s+of\s+this\s+article|©/i.test(
+        lower,
+      ) ||
+        metadataLine ||
+        line.fontSize <= bodySize * 0.82);
+    const hidden = line.fontSize <= Math.max(3, bodySize * 0.35);
+    const largeHeading = line.fontSize >= bodySize * 1.28;
+    const textHeading = looksLikeHeading(text);
+    if (
+      exactHeading ||
+      titleMatch ||
+      creatorMatch ||
+      metadata ||
+      hidden ||
+      largeHeading ||
+      textHeading
+    ) {
+      continue;
+    }
+    eligible.push(line);
+  }
+
+  const orderedLines = readingOrder(eligible, pageWidth);
+  const orderedChars = orderedLines.flatMap((line) => line.chars);
+  let text = "";
+  const charMap: number[] = [];
+  for (let i = 0; i < orderedChars.length; i++) {
+    if (i > 0) {
+      const prev = orderedChars[i - 1];
+      const cur = orderedChars[i];
+      const newLine =
+        Math.abs(cur.baseline - prev.baseline) > prev.fontSize * 0.5;
+      const gap = Math.max(
+        cur.rect[0] - prev.rect[2],
+        prev.rect[0] - cur.rect[2],
+      );
+      const space = !newLine && gap > prev.fontSize * 0.18;
+      if (newLine || space) {
+        text += " ";
+        charMap.push(-1);
+      }
+    }
+    for (const character of orderedChars[i].c) {
+      text += character;
+      charMap.push(i);
+    }
+  }
+  return { pageIndex, text, charMap, chars: orderedChars };
 }
 
 /**
@@ -172,34 +587,14 @@ export async function extractPage(
   if (!chars.length) {
     return { pageIndex, text: "", charMap: [], chars: [] };
   }
-  let text = "";
-  const charMap: number[] = [];
-  for (let i = 0; i < chars.length; i++) {
-    if (i > 0) {
-      const prev = chars[i - 1];
-      const cur = chars[i];
-      const newLine =
-        Math.abs(cur.baseline - prev.baseline) > prev.fontSize * 0.5;
-      // Distance between the two glyph boxes, whichever side the next one sits
-      // on. Right-to-left scripts (Arabic, Persian, Hebrew) advance leftwards,
-      // so measuring only cur.left - prev.right is always negative there and no
-      // space is ever synthesised, gluing every word of the page together.
-      const gap = Math.max(
-        cur.rect[0] - prev.rect[2],
-        prev.rect[0] - cur.rect[2],
-      );
-      const space = !newLine && gap > prev.fontSize * 0.18;
-      if (newLine || space) {
-        text += " ";
-        charMap.push(-1);
-      }
-    }
-    for (const ch of chars[i].c) {
-      text += ch;
-      charMap.push(i);
-    }
-  }
-  return { pageIndex, text, charMap, chars };
+  const pageWidth =
+    Array.isArray(vb) && vb.length >= 4 ? Number(vb[2]) - Number(vb[0]) : 0;
+  return buildStructuredPage(
+    pageIndex,
+    chars,
+    pageWidth,
+    structureHintsForReader(reader),
+  );
 }
 
 /** Merge per-char rects of a range into per-line rectangles. */
@@ -277,7 +672,7 @@ export async function installOverlays(
       `.${HL_CLASS}{position:absolute;pointer-events:none;border-radius:2px;mix-blend-mode:multiply;z-index:3;}` +
       `.${HL_CLASS}-flag{position:absolute;pointer-events:none;z-index:4;font:600 9px sans-serif;` +
       `padding:1px 5px 1px 4px;border-radius:2px 0 0 2px;color:#2e414f;background:#fff;` +
-      `box-shadow:0 0 2px rgba(0,0,0,0.35);white-space:nowrap;}`;
+      `box-shadow:0 0 2px rgba(0,0,0,0.35);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}`;
     doc.head.appendChild(style);
   }
 
@@ -300,6 +695,32 @@ export async function installOverlays(
       if (page) pageCache.set(pageIndex, page);
     }
     if (!page) return;
+
+    // Find the actual left edge of readable page text. Filtering relative to
+    // the median font size excludes tiny hidden publisher/metadata text that
+    // otherwise makes the apparent margin collapse.
+    const visibleChars = page.chars.filter((char) => char.c.trim());
+    const fontSizes = visibleChars
+      .map((char) => char.fontSize)
+      .filter((size) => size > 0)
+      .sort((a, b) => a - b);
+    const medianFont = fontSizes[Math.floor(fontSizes.length / 2)] || 1;
+    const textLefts = visibleChars
+      .filter((char) => char.fontSize >= medianFont * 0.6)
+      .map((char) => {
+        const vr = pv.viewport.convertToViewportRectangle(
+          Cu.cloneInto([...char.rect], h!.win),
+        );
+        return Math.min(vr[0], vr[2]);
+      });
+    const detectedTextLeft = textLefts.reduce(
+      (left, candidate) => Math.min(left, candidate),
+      Number.POSITIVE_INFINITY,
+    );
+    const pageTextLeft = Number.isFinite(detectedTextLeft)
+      ? detectedTextLeft
+      : 48;
+
     for (const spec of pageSpecs) {
       const lineRects = rangeToLineRects(page, spec.startChar, spec.endChar);
       let first = true;
@@ -322,16 +743,23 @@ export async function installOverlays(
         if (first && showFlags && spec.label) {
           const flag = doc.createElement("div");
           flag.className = `${HL_CLASS} ${HL_CLASS}-flag`;
-          flag.textContent =
-            spec.label.charAt(0).toUpperCase() + spec.label.slice(1);
+          flag.textContent = abbreviateFlagLabel(spec.label);
+          flag.title = spec.label.charAt(0).toUpperCase() + spec.label.slice(1);
+          flag.setAttribute("aria-label", flag.title);
           flag.style.top = `${top}px`;
-          flag.style.left = "2px";
           // Highlight rects are in viewport coordinates and grow with zoom, so
           // a fixed-size chip shrinks relative to the text. Scale it to match,
           // clamped so it stays legible when zoomed out and does not dominate
           // the margin when zoomed far in.
           applyFlagScale(flag, pv.viewport?.scale ?? 1, spec.colorRGB);
           pageDiv.appendChild(flag);
+          const layout = marginFlagLayout(
+            pageTextLeft,
+            flag.getBoundingClientRect().width,
+          );
+          flag.style.left = `${layout.left}px`;
+          flag.style.maxWidth = `${layout.maxWidth}px`;
+          flag.style.boxSizing = "border-box";
         }
         first = false;
       }
@@ -684,24 +1112,31 @@ export async function installEpubOverlays(
         ? rl.label.charAt(0).toUpperCase() + rl.label.slice(1)
         : "";
       const flag = doc.createElement("div");
-      flag.textContent = name;
-      // Anchor the chip's right edge just left of the text; fall back to the far
-      // left margin when the text starts too close to the edge.
-      const anchor =
-        rc.left > 60
-          ? `left:auto;right:${Math.round(W - rc.left + 4)}px;`
-          : `left:2px;`;
+      flag.textContent = abbreviateFlagLabel(name);
+      flag.title = name;
+      flag.setAttribute("aria-label", name);
       flag.setAttribute(
         "style",
         "position:fixed;" +
-          anchor +
+          "left:2px;" +
           `top:${Math.round(rc.top)}px;` +
           "background:#fff;color:#2e414f;" +
-          "box-shadow:0 0 2px rgba(0,0,0,0.35);white-space:nowrap;",
+          "box-shadow:0 0 2px rgba(0,0,0,0.35);white-space:nowrap;" +
+          "overflow:hidden;text-overflow:ellipsis;box-sizing:border-box;",
       );
       // Track the reader's zoom, as on the PDF side.
       applyFlagScale(flag, pv.scale ?? 1, rl.color);
       layer.appendChild(flag);
+      const block = rl.range.startContainer?.parentElement?.closest?.(
+        "p,li,blockquote,dd,dt",
+      );
+      const textLeft = block?.getBoundingClientRect?.().left ?? rc.left;
+      const layout = marginFlagLayout(
+        textLeft,
+        flag.getBoundingClientRect().width,
+      );
+      flag.style.left = `${layout.left}px`;
+      flag.style.maxWidth = `${layout.maxWidth}px`;
     }
   };
 

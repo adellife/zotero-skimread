@@ -61,7 +61,12 @@ import {
 } from "../reader/adapter";
 import { extractEpubSections } from "../reader/epub";
 import { saveEpubHighlights, saveNativeHighlights } from "./annotations";
-import { analyzeZones, overlapsFurniture, refSignalScore } from "./zoning";
+import {
+  analyzeZones,
+  overlapsFurniture,
+  pageLines,
+  refSignalScore,
+} from "./zoning";
 
 /** Reader document type. EPUBs use a text-only (no-overlay) path. */
 function isEpub(reader: any): boolean {
@@ -126,10 +131,12 @@ export interface ClassifiedSentence {
   text: string;
   label: string;
   confidence: number;
+  /** Structural context retained for the whole-document narrative pass. */
+  section?: DocumentSection;
   /**
    * Kept by the reduce pass as part of the document's narrative. Core sentences
-   * are shown first at any density; the rest fill the remaining slots, so the
-   * density slider becomes "how much beyond the core story to show".
+   * form the default reading view; the remaining candidates are optional
+   * supporting context that the reader can reveal explicitly.
    */
   core?: boolean;
 }
@@ -202,7 +209,6 @@ const MIN_LEN = 40;
 // dropping. Over-long segments are split at clause boundaries (splitLongSegment).
 const MAX_LEN = 800;
 const DISCOVERY_SAMPLE_CHARS = 6000;
-const MAX_HIGHLIGHTS_PER_PAGE = 10;
 const CONTEXT_RESERVE_TOKENS = 6000;
 
 export type LabelMode = "default" | "custom" | "auto";
@@ -361,14 +367,13 @@ export async function getCachedLabels(
   return (await cacheRead(await cacheKey(attachment)))?.labels ?? null;
 }
 
-/** Selected highlights (density- and label-filtered) for the EPUB sidebar list. */
+/** Selected highlights for the current core/context reading view. */
 export async function getCachedHighlights(
   attachment: Zotero.Item,
 ): Promise<HighlightSpec[]> {
   const payload = await cacheRead(await cacheKey(attachment));
   if (!payload?.complete) return [];
-  const density = Number(getPref("highlightDensity")) || 3;
-  return selectTopPerPage(payload.sentences, payload.labels, density);
+  return selectVisibleHighlights(payload.sentences, payload.labels);
 }
 
 /** Whether this exact cached skim run has already been saved to Zotero. */
@@ -436,6 +441,79 @@ function headingTrimOffset(text: string): number {
   return m[0].length;
 }
 
+/** Median font size of a visual line, with page body size as a fallback. */
+function medianFontSize(
+  page: PageText,
+  startChar: number,
+  endChar: number,
+): number {
+  const sizes = page.chars
+    .slice(startChar, endChar)
+    .map((char) => char.fontSize)
+    .sort((a, b) => a - b);
+  return sizes.length ? sizes[Math.floor(sizes.length / 2)] : 0;
+}
+
+/**
+ * Whether a visual line is a structural subtitle rather than a sentence. This
+ * deliberately combines typography with text shape: title case alone would
+ * wrongly discard prose, while font size alone is unreliable in PDFs that use
+ * a single typeface throughout.
+ */
+function isSubtitleLine(
+  page: PageText,
+  line: ReturnType<typeof pageLines>[number],
+): boolean {
+  const text = line.text.trim();
+  if (text.length < 4 || text.length > 180 || !/[A-Za-z]{3}/.test(text)) {
+    return false;
+  }
+  const words = text
+    .replace(/^\s*(?:\d+(?:\.\d+)*|[IVXLCDM]+)[.)-]?\s*/i, "")
+    .match(/[A-Za-z][A-Za-z'’-]*/g);
+  if (!words?.length || words.length > 16) return false;
+  const numbered = /^\s*(?:\d+(?:\.\d+)*|[IVXLCDM]+)[.)-]?\s+/i.test(text);
+  const capitals = words.filter(
+    (word) => /^[A-Z]{2,}$/.test(word) || /^[A-Z]/.test(word),
+  ).length;
+  const titleLike = capitals / words.length >= 0.65;
+  const allCaps = words.every((word) => word === word.toUpperCase());
+  const lineSize = medianFontSize(page, line.startChar, line.endChar);
+  const bodySize = medianFontSize(page, 0, page.chars.length);
+  const typographic =
+    lineSize > 0 && bodySize > 0 && lineSize >= bodySize * 1.12;
+  // A normal prose sentence nearly always ends with terminal punctuation. A
+  // larger, title-like question ("Why does this matter?") remains a heading.
+  const terminal = /[.!?]\s*$/.test(text);
+  if (terminal && !typographic && !allCaps) return false;
+  return numbered || titleLike || allCaps || typographic;
+}
+
+/**
+ * A subtitle has no terminal punctuation, so Intl.Segmenter often joins it to
+ * the first prose sentence. Trim that visual line before it ever becomes an
+ * LLM candidate; return -1 when the span contains only the subtitle.
+ */
+function subtitleTrimOffset(
+  page: PageText,
+  startText: number,
+  endText: number,
+): number {
+  const line = pageLines(page).find(
+    (candidate) =>
+      startText >= candidate.startText && startText < candidate.endText,
+  );
+  if (!line || !isSubtitleLine(page, line)) return 0;
+  const next = Math.min(endText, line.endText);
+  const remainder = page.text.slice(next, endText).trimStart();
+  if (remainder.length < MIN_LEN) return -1;
+  return (
+    next -
+    startText +
+    (page.text.slice(next, endText).length - remainder.length)
+  );
+}
+
 function pushSpan(
   page: PageText,
   out: Omit<ExtractedSentence, "pageIndex" | "section">[],
@@ -445,10 +523,10 @@ function pushSpan(
   const raw = page.text.slice(startText, endText);
   const leadingWs = raw.length - raw.trimStart().length;
   let text = raw.trim();
+  let removedFront = 0;
   if (text.length < MIN_LEN || !/[a-zA-Z]{3}/.test(text)) return;
   // Title pages only: elsewhere a leading capitalised-name-plus-digits run is
   // far more likely to be prose than a byline.
-  let removedFront = 0;
   if (page.pageIndex === 0) {
     const skip = bylineTrimOffset(text);
     if (skip > 0) {
@@ -467,6 +545,15 @@ function pushSpan(
       removedFront += text.length - kept.length;
       text = kept;
     }
+  }
+  const currentStart = startText + leadingWs + removedFront;
+  const subtitleSkip = subtitleTrimOffset(page, currentStart, endText);
+  if (subtitleSkip < 0) return;
+  if (subtitleSkip > 0) {
+    const kept = text.slice(subtitleSkip).trimStart();
+    if (kept.length < MIN_LEN) return;
+    removedFront += text.length - kept.length;
+    text = kept;
   }
   // Advance the text offset by exactly what was removed, so the char range
   // (and therefore the painted rectangle) starts at the prose.
@@ -512,7 +599,7 @@ function splitLongSegment(
   }
 }
 
-function segmentSentences(
+export function segmentSentences(
   page: PageText,
 ): Omit<ExtractedSentence, "pageIndex" | "section">[] {
   const out: Omit<ExtractedSentence, "pageIndex" | "section">[] = [];
@@ -592,15 +679,19 @@ const SECTION_MARKERS: [RegExp, DocumentSection][] = [
  * role is context for the selector; only "references" gates dropping, so the
  * window is kept short (headings sit at the top) to avoid catching body text.
  */
-function sectionAtPageStart(page: PageText): DocumentSection | null {
-  const lead = page.text.slice(0, 160);
+export function sectionAtPageStart(page: PageText): DocumentSection | null {
+  const lead = page.text.slice(0, 160).trimStart();
   for (const [marker, section] of SECTION_MARKERS) {
-    if (marker.test(lead)) return section;
+    marker.lastIndex = 0;
+    const match = marker.exec(lead);
+    if (match && match.index <= 12) return section;
   }
   // Only worth scanning when the page actually contains Arabic-script text.
   if (/[؀-ۿ]/.test(lead)) {
     for (const [marker, section] of RTL_SECTION_MARKERS) {
-      if (marker.test(lead)) return section;
+      marker.lastIndex = 0;
+      const match = marker.exec(lead);
+      if (match && match.index <= 12) return section;
     }
   }
   return null;
@@ -675,9 +766,7 @@ async function discoverLabels(
   );
   const tail = whole.slice(-DISCOVERY_SAMPLE_CHARS * 0.2);
   const sample = `${head}\n[...]\n${mid}\n[...]\n${tail}`;
-  const model = modelForProvider(
-    String(getPref("tldrModel") || getPref("skimModel")),
-  );
+  const model = modelForProvider(String(getPref("skimModel")));
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const raw = await chatJSON({
@@ -765,6 +854,7 @@ async function selectDocument(
   labels: LabelDef[],
   sentences: ExtractedSentence[],
   isCancelled: () => boolean,
+  wholeDocument = true,
 ): Promise<ClassifiedSentence[]> {
   const model = modelForProvider(String(getPref("skimModel")));
   const estimate = estimateTokens(sentences);
@@ -777,11 +867,13 @@ async function selectDocument(
     );
   }
   const system = buildSkimSystem(labels);
-  const schema = buildDocumentSelectionSchema(labels);
+  const maxItems =
+    new Set(sentences.map((sentence) => sentence.pageIndex)).size * 3;
+  const schema = buildDocumentSelectionSchema(labels, maxItems);
   const user = buildDocumentSelectionPrompt(
     sentences.map((sentence, id) => ({ ...sentence, id })),
-    MAX_HIGHLIGHTS_PER_PAGE,
     labels,
+    wholeDocument ? "document" : "passage",
   );
   let lastError = "";
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -796,7 +888,13 @@ async function selectDocument(
             : "") + user,
         schema,
       });
-      const selected = validateDocumentSelection(raw, labels, sentences.length);
+      const selected = validateDocumentSelection(
+        raw,
+        labels,
+        sentences.length,
+        !wholeDocument,
+        maxItems,
+      );
       if (!selected) {
         lastError = "response did not match the required schema";
         continue;
@@ -887,7 +985,12 @@ async function selectBandAdaptive(
         user: (attempt ? "Return only valid JSON.\n\n" : "") + user,
         schema: ADAPTIVE_SCHEMA,
       });
-      const selected = validateAdaptiveSelection(raw, band.length);
+      const selected = validateAdaptiveSelection(
+        raw,
+        band.length,
+        true,
+        targetCount,
+      );
       if (!selected) continue;
       return selected.map((result) => ({
         ...band[result.id],
@@ -915,7 +1018,7 @@ async function selectBand(
 ): Promise<ClassifiedSentence[]> {
   const model = modelForProvider(String(getPref("skimModel")));
   const system = buildSkimSystem(labels);
-  const schema = buildDocumentSelectionSchema(labels);
+  const schema = buildDocumentSelectionSchema(labels, targetCount);
   const user = buildBandSelectionPrompt(
     band.map((sentence, id) => ({ ...sentence, id })),
     targetCount,
@@ -933,7 +1036,13 @@ async function selectBand(
             : "") + user,
         schema,
       });
-      const selected = validateDocumentSelection(raw, labels, band.length);
+      const selected = validateDocumentSelection(
+        raw,
+        labels,
+        band.length,
+        false,
+        targetCount,
+      );
       if (!selected) continue;
       return selected.map((result) => ({
         ...band[result.id],
@@ -975,8 +1084,7 @@ export function countByLabel(
   sentences: ClassifiedSentence[],
 ): Record<string, number> {
   const counts: Record<string, number> = {};
-  for (const s of sentences) {
-    if (s.label === "none" || s.confidence < 0.5) continue;
+  for (const s of sentencesForHighlightView(sentences)) {
     counts[s.label] = (counts[s.label] || 0) + 1;
   }
   return counts;
@@ -1001,6 +1109,7 @@ async function reducePass(
   const candidates = sentences.map((s, id) => ({
     id,
     pageIndex: s.pageIndex,
+    section: s.section,
     label: s.label,
     text: s.text,
   }));
@@ -1016,7 +1125,7 @@ async function reducePass(
             : "") + buildReducePrompt(candidates, targetCount),
         schema: REDUCE_SCHEMA,
       });
-      const kept = validateReduce(raw, candidates.length);
+      const kept = validateReduce(raw, candidates.length, targetCount);
       if (!kept?.length) continue;
       for (const { id, importance } of kept) {
         sentences[id].core = true;
@@ -1033,45 +1142,47 @@ async function reducePass(
   return false;
 }
 
-function selectTopPerPage(
+function sentencesForHighlightView(
+  all: ClassifiedSentence[],
+): ClassifiedSentence[] {
+  const eligible = all.filter(
+    (sentence) => sentence.label !== "none" && sentence.confidence >= 0.5,
+  );
+  const hasCore = eligible.some((sentence) => sentence.core);
+  const coreOnly = String(getPref("highlightView")) !== "context";
+  return coreOnly && hasCore
+    ? eligible.filter((sentence) => sentence.core)
+    : eligible;
+}
+
+function selectVisibleHighlights(
   all: ClassifiedSentence[],
   labels: LabelDef[],
-  density: number,
 ): HighlightSpec[] {
   const hidden = hiddenLabelKeys();
   const byKey = new Map(labels.map((l) => [l.key, l]));
-  const byPage = new Map<number, ClassifiedSentence[]>();
-  for (const s of all) {
-    if (s.label === "none" || s.confidence < 0.5) continue;
-    if (hidden.has(s.label) || !byKey.has(s.label)) continue;
-    if (!byPage.has(s.pageIndex)) byPage.set(s.pageIndex, []);
-    byPage.get(s.pageIndex)!.push(s);
-  }
+  const visible = sentencesForHighlightView(all)
+    .filter(
+      (sentence) => !hidden.has(sentence.label) && byKey.has(sentence.label),
+    )
+    .sort((a, b) => a.pageIndex - b.pageIndex || a.startChar - b.startChar);
   const specs: HighlightSpec[] = [];
-  for (const list of byPage.values()) {
-    // Core (narrative) sentences first, then the rest by confidence, so raising
-    // density adds context around the story rather than reshuffling it.
-    list.sort(
-      (a, b) =>
-        Number(!!b.core) - Number(!!a.core) || b.confidence - a.confidence,
-    );
-    for (const s of list.slice(0, density)) {
-      const def = byKey.get(s.label)!;
-      specs.push({
-        pageIndex: s.pageIndex,
-        startChar: s.startChar,
-        endChar: s.endChar,
-        colorRGB: def.color,
-        label: def.name,
-        text: s.text,
-      });
-    }
+  for (const sentence of visible) {
+    const def = byKey.get(sentence.label)!;
+    specs.push({
+      pageIndex: sentence.pageIndex,
+      startChar: sentence.startChar,
+      endChar: sentence.endChar,
+      colorRGB: def.color,
+      label: def.name,
+      text: sentence.text,
+    });
   }
   return specs;
 }
 
 /**
- * Save the currently visible (density- and label-filtered) overlays as
+ * Save the currently visible (core/context- and label-filtered) overlays as
  * standard Zotero highlight annotations. This is never called automatically.
  */
 export async function saveSkimAsAnnotations(
@@ -1086,8 +1197,7 @@ export async function saveSkimAsAnnotations(
   if (payload.savedAnnotationKeys?.length) {
     return { saved: payload.savedAnnotationKeys.length, alreadySaved: true };
   }
-  const density = Number(getPref("highlightDensity")) || 3;
-  const specs = selectTopPerPage(payload.sentences, payload.labels, density);
+  const specs = selectVisibleHighlights(payload.sentences, payload.labels);
   if (!specs.length) {
     throw new Error("There are no visible highlights to save");
   }
@@ -1209,7 +1319,7 @@ async function persistTldr(
 }
 
 /**
- * Generate a short TL;DR of the paper with the configured TL;DR model. Uses
+ * Generate a short TL;DR of the paper with the configured reader model. Uses
  * the document's title and leading text (abstract/intro), never fabricating
  * content. Result is cached alongside the skim run; `force` re-summarizes.
  */
@@ -1227,9 +1337,7 @@ export async function generateTldr(
   const text = await leadingText(reader, attachment);
   if (!text) throw new Error("No extractable text (scanned PDF?)");
   const title = String(attachment.getField("title") || "").trim();
-  const model = modelForProvider(
-    String(getPref("tldrModel") || getPref("skimModel")),
-  );
+  const model = modelForProvider(String(getPref("skimModel")));
   onStatus("Summarizing…");
   const tldr = await summarizeText(title, text, model);
   await persistTldr(key, attachment, tldr);
@@ -1344,8 +1452,7 @@ export async function runSkim(
   // work done so far on screen instead of wiping it.
   const paint = async (payload: CachePayload, force = false) => {
     if (!isReaderAlive(reader) || (job.cancelled && !force)) return 0;
-    const density = Number(getPref("highlightDensity")) || 3;
-    const specs = selectTopPerPage(payload.sentences, payload.labels, density);
+    const specs = selectVisibleHighlights(payload.sentences, payload.labels);
     cb.onCounts?.(countByLabel(payload.sentences));
     const opacity = Number(getPref("highlightOpacity")) || 25;
     // EPUB: reflowable, lazily-rendered HTML — paint with the CSS Custom
@@ -1619,7 +1726,7 @@ export async function runSkim(
         ? await selectBandAdaptive(labels, unit, perUnitTarget, isCancelled)
         : useBands
           ? await selectBand(labels, unit, perUnitTarget, isCancelled)
-          : await selectDocument(labels, unit, isCancelled);
+          : await selectDocument(labels, unit, isCancelled, units.length === 1);
       if (isCancelled()) break;
       if (adaptiveAuto) {
         payload.labels = labels; // labels grew this band

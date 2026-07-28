@@ -19,11 +19,12 @@ declare namespace _ZoteroTypes {
       "contextTokens": number;
       "ollamaNumCtx": number;
       "skimModel": string;
-      "tldrModel": string;
       "tldrWithSkim": boolean;
-      "highlightDensity": number;
+      "highlightView": string;
       "highlightOpacity": number;
       "showFlags": boolean;
+      "annotationLabelDestination": string;
+      "annotationCommentPrefix": boolean;
       "labelMode": string;
       "customLabels": string;
       "hiddenLabels": string;

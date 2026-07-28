@@ -8,6 +8,10 @@ import {
   HighlightSpec,
   PageText,
 } from "../reader/adapter";
+import { cleanAnnotationText } from "../utils/text";
+import { getPref } from "../utils/prefs";
+
+export { cleanAnnotationText } from "../utils/text";
 
 function colorToHex(colorRGB: string): string {
   const parts = colorRGB.split(",").map((value) => Number(value.trim()));
@@ -27,6 +31,7 @@ function colorToHex(colorRGB: string): string {
  * set filterable in Zotero and groupable in "Add Note from Annotations".
  */
 type AnnotationTags = _ZoteroTypes.Annotations.AnnotationJson["tags"];
+export type AnnotationLabelDestination = "comment" | "tag" | "none";
 
 function labelTags(label: string): AnnotationTags {
   const name = String(label || "").trim();
@@ -35,6 +40,30 @@ function labelTags(label: string): AnnotationTags {
   // source. The bundled typings describe a single {name,color} object instead,
   // so cast at this one boundary rather than weaken the call sites.
   return (name ? [{ name }] : []) as unknown as AnnotationTags;
+}
+
+function currentLabelDestination(): AnnotationLabelDestination {
+  const value = String(getPref("annotationLabelDestination") || "comment");
+  return value === "tag" || value === "none" ? value : "comment";
+}
+
+/** Zotero fields used to carry a rhetorical label into a saved annotation. */
+export function annotationLabelFields(
+  label: string,
+  destination: AnnotationLabelDestination,
+  includePluginName = false,
+): { comment: string; tags: AnnotationTags } {
+  const name = String(label || "").trim();
+  if (!name || destination === "none") {
+    return { comment: "", tags: [] as unknown as AnnotationTags };
+  }
+  if (destination === "tag") {
+    return { comment: "", tags: labelTags(name) };
+  }
+  return {
+    comment: includePluginName ? `SkimRead: ${name}` : name,
+    tags: [] as unknown as AnnotationTags,
+  };
 }
 
 function annotationKey(): string {
@@ -68,20 +97,25 @@ function annotationJSON(
   );
   if (!position) return null;
   const key = annotationKey();
+  const labelFields = annotationLabelFields(
+    spec.label,
+    currentLabelDestination(),
+    getPref("annotationCommentPrefix") === true,
+  );
   return {
     id: key,
     key,
     libraryID: attachment.libraryID,
     type: "highlight",
-    text: spec.text,
+    text: cleanAnnotationText(spec.text),
     isExternal: false,
     readOnly: false,
-    comment: "",
+    comment: labelFields.comment,
     color: colorToHex(spec.colorRGB),
     pageLabel: String(spec.pageIndex + 1),
     sortIndex: sortIndex(spec.pageIndex, spec.startChar),
     position,
-    tags: labelTags(spec.label),
+    tags: labelFields.tags,
     dateModified: "",
   };
 }
@@ -106,6 +140,11 @@ export async function saveEpubHighlights(
   const saved: string[] = [];
   for (const ann of annotations) {
     const key = annotationKey();
+    const labelFields = annotationLabelFields(
+      ann.skimreadLabel,
+      currentLabelDestination(),
+      getPref("annotationCommentPrefix") === true,
+    );
     const json = {
       ...ann,
       id: key,
@@ -113,9 +152,12 @@ export async function saveEpubHighlights(
       libraryID: attachment.libraryID,
       isExternal: false,
       readOnly: false,
-      comment: "",
+      comment: labelFields.comment,
+      ...(typeof ann.text === "string"
+        ? { text: cleanAnnotationText(ann.text) }
+        : {}),
       pageLabel: String(ann.pageLabel ?? ""),
-      tags: labelTags(ann.skimreadLabel),
+      tags: labelFields.tags,
       dateModified: "",
     } as _ZoteroTypes.Annotations.AnnotationJson;
     const item = await Zotero.Annotations.saveFromJSON(attachment, json);

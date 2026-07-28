@@ -1,8 +1,8 @@
 # SkimRead for Zotero
 
 SkimRead adds document-wide AI skimming highlights to Zotero’s reader, for
-both **PDFs and EPUBs**. It reads the document as a whole, selects the
-sentences that best convey its goal, method, results, and novelty, and shows
+both **PDFs and EPUBs**. It follows the document's narrative across its
+sections or chapters, selects the sentences that best convey it, and shows
 them as coloured overlays in the reader.
 
 It is designed to work independently of other Zotero AI plugins.
@@ -29,11 +29,13 @@ It is a triage aid, not a summary and not a substitute for reading. Please see
   setting, which reduces the number of parts.
 - Runs privately with [Ollama](https://ollama.com) or a localhost-compatible
   server by default.
-- Supports optional OpenAI API, Anthropic API, and ChatGPT/Codex App Server
-  providers after an explicit cloud-consent choice.
+- Supports local or cloud OpenAI-compatible servers, including API providers
+  that expose a compatible endpoint, plus ChatGPT/Codex or Claude subscription
+  logins. Anything remote requires explicit cloud consent.
 - Keeps results in a local cache so a previously processed PDF can be reopened
   quickly.
-- Lets you adjust labels, density, opacity, and margin labels.
+- Lets you switch between the core narrative and optional supporting context,
+  and adjust labels, opacity, and margin labels.
 - Keeps highlights temporary by default. **Save as Zotero annotations…** is an
   explicit action that creates standard Zotero highlights, which survive
   reopening and work with Zotero’s **Add Note from Annotations** command.
@@ -45,11 +47,47 @@ It is a triage aid, not a summary and not a substitute for reading. Please see
 2. In Zotero, choose **Tools → Plugins**.
 3. Select the gear menu, then **Install Plugin From File…**, and select the
    downloaded `.xpi`.
-4. Restart Zotero.
-5. Open **Settings → SkimRead**, choose a provider, and use **Test
+4. Open **Settings → SkimRead**, choose a provider, and use **Test
    connection**.
-6. Open a born-digital PDF and select **SkimRead** in the right sidebar.
+5. Open a born-digital PDF and select **SkimRead** in the right sidebar.
    Choose **Generate**.
+
+A first installation does not normally require restarting Zotero. To replace a
+manually installed older build, remove the old plugin, restart Zotero, and then
+install the new `.xpi`.
+
+## Quick start for new users
+
+You do not need to own a powerful computer or pay for a model before trying
+SkimRead:
+
+- For the most private setup, use **Ollama**. The paper stays on your computer,
+  but you must install a model locally; an 8B model or larger is a better
+  starting point for judging a paper's narrative than a very small model.
+- If you cannot run a local model, use an OpenAI-compatible cloud API. Some
+  providers offer free tiers or trial credits. For example,
+  [OpenRouter's free router](https://openrouter.ai/openrouter/free) can select
+  from currently available free models.
+
+To try OpenRouter, create an OpenRouter API key and enter:
+
+1. **Provider:** OpenAI-compatible
+2. **Server URL:** `https://openrouter.ai/api/v1`
+3. **API key:** your OpenRouter key
+4. **Reader model:** `openrouter/free`
+5. Enable **I understand that extracted PDF text will leave this computer**,
+   then select **Test connection**.
+
+Free models are useful for trying the plugin, but availability, rate limits,
+context capacity, and selection quality can vary. The free router may use a
+different model between requests, so a fixed model from OpenRouter or another
+cloud API may give more consistent results. Always review a provider's current
+pricing, privacy policy, and data-handling terms before sending a document.
+
+After generation, choose **Core narrative** in the reader sidebar for the
+smallest set of sentences that carries the document's story, or **Core +
+supporting context** to also show evidence, explanation, and examples. This
+switch uses the cached result and does not send the paper to the model again.
 
 ## Using it
 
@@ -71,15 +109,41 @@ is cached.
   for an article it proposes a single set of labels up front, while for EPUBs,
   books, theses and reports (detected from the Zotero **Item Type**) labels
   evolve chapter by chapter, since topics shift across a book.
-- **Density / opacity / margin flags** — adjust how many highlights appear per
-  page, how strong the colour is, and whether the label chips show in the
-  margin. These re-apply instantly from cache without contacting the model.
+- **Reading highlights** — _Core narrative_ shows the smallest set selected to
+  tell the paper's story. _Core + supporting context_ also reveals useful
+  evidence, explanation, and examples. Opacity and margin flags re-apply
+  instantly from cache without contacting the model.
 - **Save as Zotero annotations…** converts the currently shown highlights into
   standard Zotero highlight annotations that persist and work with **Add Note
-  from Annotations**. Nothing is written to your library until you use it.
+  from Annotations**. In Settings, choose whether each rhetorical label is
+  written into the annotation comment (the default, visible in extracted
+  notes), saved as a tag for filtering, or not saved. Comment labels contain
+  only the label name by default; an optional setting adds the `SkimRead:`
+  prefix. Nothing is written to your library until you use it.
 - **TL;DR summary** generates a short 2–4 sentence summary of the paper with the
-  TL;DR model and shows it in the sidebar. It is cached with the run; press again
-  to refresh it.
+  selected reader model and shows it in the sidebar. It is cached with the run;
+  press again to refresh it.
+
+### What you can customize
+
+In **Settings → SkimRead**, you can change:
+
+- The provider, server URL, API key, cloud consent, and reader model.
+- The context budget, which controls how much text is considered in each
+  document part. Ollama also has a separate context-length setting for the
+  model server; larger values use more GPU memory.
+- Custom rhetorical labels and their descriptions for the reader's **Custom**
+  label mode.
+- Whether labels on saved Zotero annotations are placed in the comment, saved
+  as tags, or omitted, and whether comments include the `SkimRead:` prefix.
+
+In the **SkimRead reader sidebar**, you can change:
+
+- The label mode: **Default**, **Custom**, or **Auto-discover**.
+- Which individual labels are visible.
+- **Core narrative** or **Core + supporting context**.
+- Highlight opacity and whether margin flags are shown.
+- Whether a TL;DR is generated together with the skim.
 
 ## Providers
 
@@ -90,26 +154,33 @@ Choose one in **Settings → SkimRead → API type**, then **Test connection**.
 1. Install [Ollama](https://ollama.com) and start it (`ollama serve`).
 2. Pull a model, e.g. `ollama pull llama3.1:8b`.
 3. In Settings, set **Server URL** to `http://localhost:11434` and the
-   **Skim model** to the model name you pulled.
+   **Reader model** to the model name you pulled. The same model handles
+   highlights and TL;DRs, so local setup only loads one model.
 
 Tip: give Ollama enough context to hold a whole paper. The **Context size**
 setting controls `num_ctx`; if a paper is split into many parts, raise it (for
-example to `32768`) provided your GPU has the memory. A remote Ollama server
-can be reached through an SSH tunnel and still counts as local:
-`ssh -N -L 11434:localhost:11434 you@server`.
+example to `32768`) provided your GPU has the memory.
 
 ### OpenAI-compatible local server (vLLM, llama.cpp, LM Studio)
 
 Point **Server URL** at the server’s base address (the `/v1` suffix is added
-automatically). Set **Skim model** to the served model name. This stays on
+automatically). Set **Reader model** to the served model name. This stays on
 localhost and needs no cloud consent.
 
-### OpenAI API / Anthropic API (cloud)
+### OpenAI-compatible cloud APIs
+
+This mode supports services such as OpenRouter, OpenAI, Anthropic-compatible
+endpoints, and other providers that expose an OpenAI-compatible
+`/v1/chat/completions` API.
 
 1. Tick **I understand that extracted PDF text will leave this computer**.
-2. Paste your API key.
-3. Set **Skim model** to a model your account can use, and adjust the **Cloud
-   context budget** to the model’s context window.
+2. Enter the provider's base URL and paste your API key.
+3. Set **Reader model** to a model your account can use, and adjust the
+   **Context budget** to the model's context window.
+
+Free tiers and trial credits may be available from some providers, but their
+limits and terms change. See the [Quick start for new
+users](#quick-start-for-new-users) for an OpenRouter free-model example.
 
 ### Codex App Server (ChatGPT login)
 
@@ -180,34 +251,9 @@ as a substitute for reading it.
   cloud context budget so more of the document fits per pass.
 - **No highlights on scanned PDFs** — SkimRead needs selectable text; run OCR
   on the PDF in Zotero first.
-
-## Status
-
-Version 0.2.0 adds EPUB support, pause/resume for long runs, and
-document-type-aware label discovery, alongside the existing document-wide
-skimming highlights, TL;DR summaries, and native Zotero annotation export.
-Inline citation cards are planned for a later release.
-
-**Save as Zotero annotations** works for both PDFs and EPUBs. For EPUBs, only
-passages in chapters the reader has already rendered can be converted; scroll
-through the book once if some are reported as skipped.
-
-Known limitation: scanned PDFs need OCR first, since SkimRead requires
-selectable text.
-
-## Develop
-
-```bash
-npm install
-npm run build     # → .scaffold/build/skim-read.xpi
-```
-
-The tests run inside Zotero. Copy `.env.example` to `.env` and set
-`ZOTERO_PLUGIN_ZOTERO_BIN_PATH` to your Zotero binary, then:
-
-```bash
-npm test          # launches Zotero and runs the test suite
-```
+- **Some EPUB annotations are skipped** — Zotero can save only passages from
+  chapters the reader has rendered. Scroll through the book once, then use
+  **Save as Zotero annotations…** again.
 
 ## Acknowledgements
 
@@ -236,3 +282,6 @@ Except where a source file states otherwise, no code is reused from them:
 ## License
 
 [AGPL-3.0-or-later](LICENSE)
+
+Developers who want to modify or build SkimRead can follow the separate
+[contributor guide](CONTRIBUTING.md).

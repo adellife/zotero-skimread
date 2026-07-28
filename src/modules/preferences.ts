@@ -69,7 +69,6 @@ export function onPrefsLoad(window: Window) {
       set("url-row", http);
       set("compat-key-row", http);
       set("skim-model-row", http);
-      set("tldr-model-row", http);
       set("num-ctx-row", http);
       set("ollama-ctx-row", http);
       // Consent covers the CLI logins and any remote OpenAI-compatible endpoint;
@@ -115,7 +114,11 @@ export function onPrefsLoad(window: Window) {
 
   const bindSelect = (
     id: string,
-    pref: "claudeModel" | "codexModel" | "codexReasoning",
+    pref:
+      | "claudeModel"
+      | "codexModel"
+      | "codexReasoning"
+      | "annotationLabelDestination",
     fallback: string,
   ) => {
     const el = $(id) as (Element & { value: string }) | null;
@@ -137,6 +140,21 @@ export function onPrefsLoad(window: Window) {
 
   bindSelect("claudeModel", "claudeModel", "sonnet");
   bindSelect("codexReasoning", "codexReasoning", "medium");
+  bindSelect(
+    "annotationLabelDestination",
+    "annotationLabelDestination",
+    "comment",
+  );
+  const commentPrefix = $("annotationCommentPrefix") as
+    | (Element & { checked: boolean })
+    | null;
+  if (commentPrefix) {
+    commentPrefix.checked = getPref("annotationCommentPrefix") === true;
+    const savePrefix = () =>
+      setPref("annotationCommentPrefix", commentPrefix.checked);
+    commentPrefix.addEventListener("command", savePrefix);
+    commentPrefix.addEventListener("change", savePrefix);
+  }
   const codexModelSel = bindSelect("codexModel", "codexModel", "gpt-5.6-luna");
 
   // Codex exposes a model list over its app server, so offer the real thing

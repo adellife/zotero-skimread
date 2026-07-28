@@ -10,11 +10,12 @@ pref("cloudConsent", false);
 pref("contextTokens", 8192);
 pref("ollamaNumCtx", 0);
 pref("skimModel", "gemma4:e4b");
-pref("tldrModel", "mistral-small3.2:24b");
 pref("tldrWithSkim", false);
-pref("highlightDensity", 3);
+pref("highlightView", "core");
 pref("highlightOpacity", 25);
 pref("showFlags", true);
+pref("annotationLabelDestination", "comment");
+pref("annotationCommentPrefix", false);
 pref("labelMode", "default");
 pref(
   "customLabels",

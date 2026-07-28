@@ -181,20 +181,6 @@
     />
   </hbox>
 
-  <hbox id="zotero-prefpane-__addonRef__-tldr-model-row" align="center">
-    <html:label
-      for="zotero-prefpane-__addonRef__-tldrModel"
-      data-l10n-id="pref-tldr-model"
-    ></html:label>
-    <html:input
-      type="text"
-      id="zotero-prefpane-__addonRef__-tldrModel"
-      preference="tldrModel"
-      list="zotero-prefpane-__addonRef__-model-list"
-      style="width: 220px"
-    ></html:input>
-  </hbox>
-
   <hbox id="zotero-prefpane-__addonRef__-num-ctx-row" align="center">
     <html:label
       for="zotero-prefpane-__addonRef__-contextTokens"
@@ -224,6 +210,35 @@
       style="width: 110px"
     ></html:input>
   </hbox>
+
+  <hbox align="center">
+    <html:label
+      for="zotero-prefpane-__addonRef__-annotationLabelDestination"
+      data-l10n-id="pref-annotation-label-destination"
+    ></html:label>
+    <menulist
+      id="zotero-prefpane-__addonRef__-annotationLabelDestination"
+      style="width: 260px"
+    >
+      <menupopup>
+        <menuitem
+          data-l10n-id="pref-annotation-label-comment"
+          value="comment"
+        />
+        <menuitem data-l10n-id="pref-annotation-label-tag" value="tag" />
+        <menuitem data-l10n-id="pref-annotation-label-none" value="none" />
+      </menupopup>
+    </menulist>
+  </hbox>
+  <description
+    data-l10n-id="pref-annotation-label-help"
+    style="max-width: 540px; font-size: 12px; opacity: 0.8"
+  ></description>
+  <checkbox
+    id="zotero-prefpane-__addonRef__-annotationCommentPrefix"
+    preference="annotationCommentPrefix"
+    data-l10n-id="pref-annotation-comment-prefix"
+  />
 
   <vbox>
     <html:label
