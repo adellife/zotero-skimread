@@ -6,6 +6,7 @@
  * acknowledgement, and never receive a request through an implicit fallback.
  */
 import { getPref } from "../utils/prefs";
+import { buildAntigravityPrompt } from "../prompts/skim";
 
 export interface OllamaStatus {
   ok: boolean;
@@ -15,8 +16,12 @@ export interface OllamaStatus {
 }
 
 // One HTTP transport (OpenAI-compatible /v1/chat/completions) for every local
-// or cloud endpoint, plus two subscription-login CLIs run as subprocesses.
-type ApiType = "openai-compatible" | "codex-app-server" | "claude-code";
+// or cloud endpoint, plus subscription-login CLIs run as subprocesses.
+type ApiType =
+  | "openai-compatible"
+  | "codex-app-server"
+  | "claude-code"
+  | "antigravity-cli";
 
 interface RequestOptions {
   headers?: Record<string, string>;
@@ -27,7 +32,13 @@ interface RequestOptions {
 
 function apiType(): ApiType {
   const value = String(getPref("apiType") || "openai-compatible");
-  if (value === "codex-app-server" || value === "claude-code") return value;
+  if (
+    value === "codex-app-server" ||
+    value === "claude-code" ||
+    value === "antigravity-cli"
+  ) {
+    return value;
+  }
   // Legacy provider names (ollama / openai / openai-api / anthropic) all use
   // the OpenAI-compatible transport now.
   return "openai-compatible";
@@ -39,6 +50,8 @@ export function providerLabel(): string {
       return "Codex App Server";
     case "claude-code":
       return "Claude Code";
+    case "antigravity-cli":
+      return "Antigravity CLI";
     default:
       return "OpenAI-compatible";
   }
@@ -73,6 +86,8 @@ export function connectionHint(): string {
       return "check the Codex CLI path in Settings";
     case "claude-code":
       return 'run "claude login", then check the CLI path in Settings';
+    case "antigravity-cli":
+      return "sign in with agy, then check the Antigravity CLI path in Settings";
     default:
       return knownOllama() || baseUrl(true).includes(":11434")
         ? 'start it with "ollama serve", or check the SSH tunnel if it is remote'
@@ -82,7 +97,11 @@ export function connectionHint(): string {
 
 /** Providers that run a local CLI subprocess instead of an HTTP endpoint. */
 function isSubprocessProvider(): boolean {
-  return apiType() === "codex-app-server" || apiType() === "claude-code";
+  return (
+    apiType() === "codex-app-server" ||
+    apiType() === "claude-code" ||
+    apiType() === "antigravity-cli"
+  );
 }
 
 /**
@@ -191,6 +210,9 @@ export function modelForProvider(configuredModel: string): string {
   if (apiType() === "claude-code") {
     return String(getPref("claudeModel") || "").trim();
   }
+  if (apiType() === "antigravity-cli") {
+    return String(getPref("antigravityModel") || "").trim();
+  }
   return configuredModel.trim();
 }
 
@@ -281,6 +303,102 @@ export function parseLooseJSON(raw: string): unknown {
     : new Error("No parsable JSON in the model response");
 }
 
+export interface AntigravityResult {
+  value: unknown;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+/**
+ * Unwrap `agy --output-format json`. Kept pure and exported so changes to the
+ * CLI envelope can be regression-tested without starting Antigravity.
+ */
+export function parseAntigravityEnvelope(raw: string): AntigravityResult {
+  const envelope = parseLooseJSON(raw) as {
+    status?: unknown;
+    response?: unknown;
+    structured_output?: unknown;
+    error?: unknown;
+    usage?: { input_tokens?: unknown; output_tokens?: unknown };
+  };
+  if (
+    envelope.status !== undefined &&
+    String(envelope.status).toUpperCase() !== "SUCCESS"
+  ) {
+    throw new Error(
+      String(
+        envelope.error ||
+          envelope.response ||
+          `Antigravity ended with status ${String(envelope.status)}`,
+      ),
+    );
+  }
+  let value = envelope.structured_output;
+  if (value === undefined && typeof envelope.response === "string") {
+    value = parseLooseJSON(envelope.response);
+  }
+  if (value === undefined) {
+    throw new Error("Antigravity CLI returned no structured output");
+  }
+  return {
+    value,
+    inputTokens: num(envelope.usage?.input_tokens),
+    outputTokens: num(envelope.usage?.output_tokens),
+  };
+}
+
+/**
+ * Parse `agy models` across CLI versions. Some builds use tabs, while others
+ * render the same table with spaces or send it through stderr alongside the
+ * fetching notice. Model slugs always contain a separator such as `-`.
+ */
+export function parseAntigravityModels(raw: string): string[] {
+  const seen = new Set<string>();
+  const ansiSequence = new RegExp(
+    `${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`,
+    "g",
+  );
+  const modelSlug = /\b([a-z0-9][a-z0-9._-]*-[a-z0-9._-]+)\b/gi;
+  for (const sourceLine of raw.split(/\r?\n/)) {
+    const line = sourceLine.replace(ansiSequence, "");
+    for (const match of line.matchAll(modelSlug)) seen.add(match[1]);
+  }
+  return [...seen];
+}
+
+/** Parse the quota-free `/model` print response used by the health check. */
+export function parseAntigravityCurrentModel(raw: string): string {
+  const envelope = parseLooseJSON(raw) as {
+    status?: unknown;
+    response?: unknown;
+    error?: unknown;
+    command?: { data?: { id?: unknown } };
+  };
+  if (
+    envelope.status !== undefined &&
+    String(envelope.status).toUpperCase() !== "SUCCESS"
+  ) {
+    throw new Error(
+      String(
+        envelope.error ||
+          envelope.response ||
+          `Antigravity ended with status ${String(envelope.status)}`,
+      ),
+    );
+  }
+  const commandModel = envelope.command?.data?.id;
+  if (typeof commandModel === "string" && commandModel.trim()) {
+    return commandModel.trim();
+  }
+  if (typeof envelope.response === "string") {
+    const responseModel = envelope.response.trim().split(/\s+/, 1)[0] || "";
+    if (/^[a-z0-9][a-z0-9._-]*-[a-z0-9._-]+$/i.test(responseModel)) {
+      return responseModel;
+    }
+  }
+  throw new Error("Antigravity CLI returned no current model");
+}
+
 interface CodexPipe {
   readString(): Promise<string>;
 }
@@ -297,7 +415,9 @@ interface CodexSubprocessModule {
     command: string;
     arguments: string[];
     stderr: "pipe";
+    workdir?: string;
   }): Promise<CodexSubprocess>;
+  pathSearch?(command: string): Promise<string>;
 }
 
 interface PendingCodexRequest {
@@ -664,6 +784,241 @@ async function claudeVersion(): Promise<string> {
   return out.trim() || "Claude Code";
 }
 
+// ---------- Antigravity CLI (Google account/subscription login) ----------
+
+async function resolveAntigravityCommand(
+  Subprocess: CodexSubprocessModule,
+): Promise<string> {
+  const configured = String(getPref("antigravityPath") || "").trim();
+  const home = homeDir();
+  const candidates = [
+    configured,
+    home ? PathUtils.join(home, ".local", "bin", "agy") : "",
+    "/opt/homebrew/bin/agy",
+    "/usr/local/bin/agy",
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    try {
+      if (await IOUtils.exists(candidate)) return candidate;
+    } catch {
+      // Keep trying the remaining known locations.
+    }
+  }
+  try {
+    const found = await Subprocess.pathSearch?.("agy");
+    if (found) return found;
+  } catch {
+    // The editable absolute path remains the final fallback.
+  }
+  return configured || "agy";
+}
+
+async function readPipe(pipe?: CodexPipe): Promise<string> {
+  if (!pipe) return "";
+  let out = "";
+  for (;;) {
+    const chunk = await pipe.readString();
+    if (!chunk) break;
+    out += chunk;
+  }
+  return out;
+}
+
+async function readSubprocess(
+  process: CodexSubprocess,
+  timeoutMs: number,
+  timeoutMessage: string,
+): Promise<[string, string]> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+  });
+  try {
+    return await Promise.race([
+      Promise.all([readPipe(process.stdout), readPipe(process.stderr)]),
+      timedOut,
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+/**
+ * One-shot schema-constrained request through Google's `agy` CLI. Antigravity
+ * is an agent CLI rather than an inference server: each call creates its own
+ * Antigravity conversation and the CLI may retain a local transcript. The
+ * settings UI discloses that behavior and this transport is consent-gated.
+ */
+async function antigravityJSON(opts: {
+  model: string;
+  system: string;
+  user: string;
+  schema: object;
+}): Promise<unknown> {
+  requireConsent();
+  const model = modelForProvider(opts.model);
+  if (!model) {
+    throw new Error("Enter an Antigravity model in SkimRead settings.");
+  }
+  const Subprocess = await loadCodexSubprocess();
+  const command = await resolveAntigravityCommand(Subprocess);
+  const prompt = buildAntigravityPrompt(opts.system, opts.user);
+  const schema = JSON.stringify(opts.schema);
+  // `agy --print` accepts the prompt as a process argument rather than stdin.
+  // Stay comfortably below macOS's process-argument limit and tell the user
+  // how to make SkimRead split the document more finely if needed.
+  if (prompt.length + schema.length > 400_000) {
+    throw new Error(
+      "This Antigravity request is too large for CLI print mode. Lower SkimRead's context budget so the document is processed in smaller parts.",
+    );
+  }
+  const args = [
+    "--print",
+    prompt,
+    "--output-format",
+    "json",
+    "--json-schema",
+    schema,
+    "--model",
+    model,
+    "--disable-slash-commands",
+    "--sandbox",
+    "--print-timeout",
+    "5m",
+  ];
+  let process: CodexSubprocess;
+  try {
+    process = await Subprocess.call({
+      command,
+      arguments: args,
+      stderr: "pipe",
+      workdir: PathUtils.tempDir,
+    });
+  } catch (error) {
+    throw new Error(
+      `Could not start Antigravity CLI (${command}). Install agy, sign in, and set its path in SkimRead settings. ${String(error)}`,
+    );
+  }
+  try {
+    const [out, err] = await Promise.all([
+      readPipe(process.stdout),
+      readPipe(process.stderr),
+    ]);
+    if (!out.trim()) {
+      throw new Error(err.trim() || "Antigravity CLI returned no output");
+    }
+    const parsed = parseAntigravityEnvelope(out);
+    recordUsage(parsed.inputTokens, parsed.outputTokens);
+    return parsed.value;
+  } finally {
+    try {
+      process.kill();
+    } catch {
+      // Already exited.
+    }
+  }
+}
+
+async function antigravityStatus(): Promise<OllamaStatus> {
+  requireConsent();
+  const Subprocess = await loadCodexSubprocess();
+  const command = await resolveAntigravityCommand(Subprocess);
+  const process = await Subprocess.call({
+    command,
+    // `/model` is a read-only slash command in print mode. Unlike `agy models`,
+    // it follows the same headless subprocess path as successful generation,
+    // exits cleanly under Zotero, and consumes no model tokens.
+    arguments: [
+      "--print",
+      "/model",
+      "--output-format",
+      "json",
+      "--print-timeout",
+      "10s",
+    ],
+    stderr: "pipe",
+    workdir: PathUtils.tempDir,
+  });
+  try {
+    const [out, err] = await readSubprocess(
+      process,
+      15_000,
+      "Antigravity connection check timed out",
+    );
+    const response = `${out}\n${err}`.trim();
+    if (!response) {
+      throw new Error("Antigravity CLI returned no output");
+    }
+    const currentModel = parseAntigravityCurrentModel(response);
+    const configuredModel = modelForProvider(String(getPref("skimModel")));
+    // This is a health probe, not a complete catalog. Returning an empty model
+    // list prevents a valid configured model from being flagged unavailable.
+    return {
+      ok: true,
+      version: `Antigravity CLI (configured: ${configuredModel || currentModel})`,
+      models: [],
+    };
+  } finally {
+    try {
+      process.kill();
+    } catch {
+      // Already exited.
+    }
+  }
+}
+
+/**
+ * List the full Antigravity catalog for the explicit Refresh action.
+ *
+ * `agy models` expects a terminal and can leave Mozilla's ordinary pipes open.
+ * On macOS, `/usr/bin/script` supplies a pseudo-terminal and exits reliably;
+ * no shell is involved and the configured executable remains a separate arg.
+ */
+export async function listAntigravityModels(): Promise<OllamaStatus> {
+  try {
+    requireConsent();
+    const Subprocess = await loadCodexSubprocess();
+    const agyCommand = await resolveAntigravityCommand(Subprocess);
+    const ptyCommand = "/usr/bin/script";
+    let command = agyCommand;
+    let args = ["models"];
+    try {
+      if (await IOUtils.exists(ptyCommand)) {
+        command = ptyCommand;
+        args = ["-q", "/dev/null", agyCommand, "models"];
+      }
+    } catch {
+      // Non-macOS Zotero builds can use the direct command as a fallback.
+    }
+    const process = await Subprocess.call({
+      command,
+      arguments: args,
+      stderr: "pipe",
+      workdir: PathUtils.tempDir,
+    });
+    try {
+      const [out, err] = await readSubprocess(
+        process,
+        20_000,
+        "Antigravity model listing timed out",
+      );
+      const models = parseAntigravityModels(`${out}\n${err}`);
+      if (!models.length) {
+        throw new Error(err.trim() || "Antigravity CLI returned no models");
+      }
+      return { ok: true, version: "Antigravity CLI", models };
+    } finally {
+      try {
+        process.kill();
+      } catch {
+        // Already exited.
+      }
+    }
+  } catch (error) {
+    return { ok: false, models: [], error: String(error) };
+  }
+}
+
 function responseID(result: unknown, key: "thread" | "turn"): string {
   if (!result || typeof result !== "object") return "";
   const value = result as {
@@ -813,6 +1168,8 @@ export async function checkStatus(): Promise<OllamaStatus> {
           models: configured ? [configured] : [],
         };
       }
+      case "antigravity-cli":
+        return await antigravityStatus();
       default: {
         // Warm the Ollama probe here so the status line and hints can name the
         // endpoint correctly before any generation has run.
@@ -893,6 +1250,8 @@ export async function chatJSON(opts: {
       return codexJSON(opts);
     case "claude-code":
       return claudeCodeJSON(opts);
+    case "antigravity-cli":
+      return antigravityJSON(opts);
     default: {
       const numCtx = ollamaNumCtx();
       if (numCtx > 0 || (await detectOllama())) {

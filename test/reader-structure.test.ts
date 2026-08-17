@@ -96,6 +96,74 @@ describe("reader structure", function () {
     );
   });
 
+  it("splits repeated two-column gutters just under twelve points", function () {
+    const leftX = 63;
+    const fontSize = 10;
+    const leftLines = [
+      "Left alpha column text continues here.",
+      "Left bravo column text continues here.",
+      "Left gamma column text concludes here.",
+    ];
+    const rightLines = [
+      "Right alpha column text continues here.",
+      "Right bravo column text continues here.",
+      "Right gamma column text concludes here.",
+    ];
+    const characterWidth = fontSize * 0.48;
+    const rightX = leftX + leftLines[0].length * characterWidth + 11.9;
+    const chars = leftLines.flatMap((left, index) => {
+      const baseline = 560 - index * 20;
+      return [
+        ...lineChars(left, fontSize, baseline, leftX),
+        ...lineChars(rightLines[index], fontSize, baseline, rightX),
+      ];
+    });
+
+    const page = buildStructuredPage(1, chars, 612);
+
+    assert.include(page.text, "Left gamma");
+    assert.include(page.text, "Right alpha");
+    assert.isBelow(
+      page.text.indexOf("Left gamma"),
+      page.text.indexOf("Right alpha"),
+    );
+  });
+
+  it("keeps offset two-column text in column-major reading order", function () {
+    const chars = [
+      // Both columns sit left of the physical midpoint because this synthetic
+      // page has a large right margin. Midpoint-based assignment interleaves
+      // them as left-1, right-1, left-2, right-2.
+      ...lineChars("Left passage one continues here.", 10, 560, 70),
+      ...lineChars("Right passage one continues here.", 10, 560, 360),
+      ...lineChars("Left passage two continues here.", 10, 540, 70),
+      ...lineChars("Right passage two continues here.", 10, 540, 360),
+      ...lineChars("Left passage three ends here.", 10, 520, 70),
+      ...lineChars("Right passage three ends here.", 10, 520, 360),
+    ];
+    const page = buildStructuredPage(1, chars, 1000);
+    assert.isBelow(
+      page.text.indexOf("Left passage three"),
+      page.text.indexOf("Right passage one"),
+    );
+  });
+
+  it("does not mistake consecutive indented blocks for columns", function () {
+    const chars = [
+      ...lineChars("Opening paragraph one continues here.", 10, 700, 70),
+      ...lineChars("Opening paragraph two continues here.", 10, 680, 70),
+      ...lineChars("Opening paragraph three ends here.", 10, 660, 70),
+      ...lineChars("Indented quotation one continues here.", 10, 420, 330),
+      ...lineChars("Indented quotation two continues here.", 10, 400, 330),
+      ...lineChars("Indented quotation three ends here.", 10, 380, 330),
+    ];
+    const page = buildStructuredPage(1, chars, 1000);
+    assert.isBelow(
+      page.text.indexOf("Opening paragraph three"),
+      page.text.indexOf("Indented quotation one"),
+    );
+  });
+
   it("separates first-page columns before filtering publisher and keyword blocks", function () {
     const chars = [
       ...lineChars("Contents lists available at ScienceDirect", 9, 700, 210),

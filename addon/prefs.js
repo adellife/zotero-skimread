@@ -6,6 +6,8 @@ pref("codexModel", "gpt-5.6-luna");
 pref("codexReasoning", "medium");
 pref("claudeModel", "sonnet");
 pref("claudePath", "claude");
+pref("antigravityModel", "gemini-3.7-flash-low");
+pref("antigravityPath", "");
 pref("cloudConsent", false);
 pref("contextTokens", 8192);
 pref("ollamaNumCtx", 0);

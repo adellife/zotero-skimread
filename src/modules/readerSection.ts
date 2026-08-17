@@ -66,6 +66,8 @@ const PROVIDER_PREFS = [
   "skimModel",
   "claudeModel",
   "claudePath",
+  "antigravityModel",
+  "antigravityPath",
   "codexModel",
   "codexPath",
 ] as const;

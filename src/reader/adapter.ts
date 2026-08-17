@@ -254,7 +254,13 @@ function visualLines(chars: PageChar[], pageWidth: number): VisualLine[] {
   // Detect a repeated gutter. First-page abstract layouts are often asymmetric
   // (a narrow keyword rail beside a wide abstract), so the gutter must be
   // inferred from repeated aligned gaps rather than assumed to sit at 50%.
-  const threshold = Math.max(12, pageWidth * 0.018);
+  // A real two-column gutter can be only slightly wider than the body font.
+  // The fixed 12pt floor previously missed common 11.9pt gutters, leaving the
+  // two columns fused into one visual line. Keep the cutoff font-relative so
+  // ordinary word spacing is still rejected, then require the gap to repeat
+  // on at least three aligned rows below.
+  const minimumGutterWidth = (line: VisualLine) =>
+    Math.max(7, pageWidth * 0.01, line.fontSize * 1.05);
   const candidates: Array<{
     line: VisualLine;
     index: number;
@@ -271,7 +277,7 @@ function visualLines(chars: PageChar[], pageWidth: number): VisualLine[] {
       }))
       .filter(
         (gap) =>
-          gap.width >= threshold &&
+          gap.width >= minimumGutterWidth(line) &&
           gap.center >= pageWidth * 0.12 &&
           gap.center <= pageWidth * 0.88 &&
           gap.index >= 4 &&
@@ -295,7 +301,7 @@ function visualLines(chars: PageChar[], pageWidth: number): VisualLine[] {
   }
   const repeated = groups
     .filter(
-      (group) => new Set(group.map((candidate) => candidate.line)).size >= 2,
+      (group) => new Set(group.map((candidate) => candidate.line)).size >= 3,
     )
     .sort(
       (a, b) =>
@@ -318,7 +324,7 @@ function visualLines(chars: PageChar[], pageWidth: number): VisualLine[] {
       }))
       .filter(
         (gap) =>
-          gap.width >= threshold &&
+          gap.width >= minimumGutterWidth(line) &&
           gap.left <= gutter &&
           gap.right >= gutter &&
           gap.index >= 4 &&
@@ -387,20 +393,126 @@ function structureHintsForReader(reader: any): PageStructureHints {
   }
 }
 
+interface ColumnStarts {
+  left: number;
+  right: number;
+  tolerance: number;
+}
+
+/**
+ * Infer the two repeated text starts instead of assuming the gutter lies at
+ * the physical page midpoint. Cropped pages, wide publisher margins, and
+ * asymmetric first-page designs can place both prose columns on the same side
+ * of that midpoint, which otherwise interleaves them row by row.
+ */
+function detectColumnStarts(
+  lines: VisualLine[],
+  pageWidth: number,
+): ColumnStarts | null {
+  const tolerance = Math.max(8, pageWidth * 0.035);
+  const candidates = lines
+    .filter((line) => line.x2 - line.x1 < pageWidth * 0.6)
+    .sort((a, b) => a.x1 - b.x1);
+  const clusters: Array<{
+    starts: number[];
+    lines: VisualLine[];
+    center: number;
+  }> = [];
+  for (const line of candidates) {
+    let closest: (typeof clusters)[number] | undefined;
+    let distance = Number.POSITIVE_INFINITY;
+    for (const cluster of clusters) {
+      const current = Math.abs(line.x1 - cluster.center);
+      if (current <= tolerance && current < distance) {
+        closest = cluster;
+        distance = current;
+      }
+    }
+    if (closest) {
+      closest.starts.push(line.x1);
+      closest.lines.push(line);
+      closest.center = median(closest.starts);
+    } else {
+      clusters.push({ starts: [line.x1], lines: [line], center: line.x1 });
+    }
+  }
+
+  const repeated = clusters.filter((cluster) => cluster.starts.length >= 3);
+  let best: {
+    left: (typeof repeated)[number];
+    right: (typeof repeated)[number];
+  } | null = null;
+  let bestScore = -1;
+  for (let leftIndex = 0; leftIndex < repeated.length; leftIndex++) {
+    for (
+      let rightIndex = leftIndex + 1;
+      rightIndex < repeated.length;
+      rightIndex++
+    ) {
+      const first = repeated[leftIndex];
+      const second = repeated[rightIndex];
+      const left = first.center <= second.center ? first : second;
+      const right = left === first ? second : first;
+      const separation = right.center - left.center;
+      if (separation < pageWidth * 0.2) continue;
+      const leftTop = Math.max(...left.lines.map((line) => line.baseline));
+      const leftBottom = Math.min(...left.lines.map((line) => line.baseline));
+      const rightTop = Math.max(...right.lines.map((line) => line.baseline));
+      const rightBottom = Math.min(...right.lines.map((line) => line.baseline));
+      const overlap =
+        Math.min(leftTop, rightTop) - Math.max(leftBottom, rightBottom);
+      const shorterSpan = Math.min(
+        leftTop - leftBottom,
+        rightTop - rightBottom,
+      );
+      // Repeated indents or quotations in consecutive single-column sections
+      // are not columns. Genuine columns occupy the same vertical band.
+      if (overlap < Math.max(0, shorterSpan * 0.35)) continue;
+      // Prefer a pair supported on both sides over a large cluster plus a few
+      // incidental indented/caption lines.
+      const score =
+        Math.min(left.starts.length, right.starts.length) * 10_000 +
+        (left.starts.length + right.starts.length) * 100 +
+        separation;
+      if (score > bestScore) {
+        best = { left, right };
+        bestScore = score;
+      }
+    }
+  }
+  return best
+    ? {
+        left: best.left.center,
+        right: best.right.center,
+        tolerance,
+      }
+    : null;
+}
+
 function readingOrder(lines: VisualLine[], pageWidth: number): VisualLine[] {
   if (!lines.length || pageWidth <= 0) return lines;
-  const midpoint = pageWidth / 2;
-  const narrow = lines.filter((line) => line.x2 - line.x1 < pageWidth * 0.58);
-  const left = narrow.filter((line) => (line.x1 + line.x2) / 2 < midpoint);
-  const right = narrow.filter((line) => (line.x1 + line.x2) / 2 >= midpoint);
   const topDown = (a: VisualLine, b: VisualLine) =>
     b.baseline - a.baseline || a.x1 - b.x1;
+  const columns = detectColumnStarts(lines, pageWidth);
+  if (!columns) return [...lines].sort(topDown);
+
+  const crossesBothColumns = (line: VisualLine) =>
+    line.x1 <= columns.left + columns.tolerance &&
+    line.x2 >= columns.right + pageWidth * 0.08;
+  const spanning = lines.filter(
+    (line) => line.x2 - line.x1 >= pageWidth * 0.6 || crossesBothColumns(line),
+  );
+  const columnLines = lines.filter((line) => !spanning.includes(line));
+  const left = columnLines.filter(
+    (line) =>
+      Math.abs(line.x1 - columns.left) <= Math.abs(line.x1 - columns.right),
+  );
+  const right = columnLines.filter((line) => !left.includes(line));
   if (left.length < 3 || right.length < 3) {
     return [...lines].sort(topDown);
   }
-  const columnTop = Math.max(...narrow.map((line) => line.baseline));
-  const columnBottom = Math.min(...narrow.map((line) => line.baseline));
-  const spanning = lines.filter((line) => !narrow.includes(line));
+  const columnTop = Math.max(...columnLines.map((line) => line.baseline));
+  const columnBottom = Math.min(...columnLines.map((line) => line.baseline));
   const above = spanning.filter((line) => line.baseline > columnTop);
   const below = spanning.filter((line) => line.baseline < columnBottom);
   const within = spanning.filter(

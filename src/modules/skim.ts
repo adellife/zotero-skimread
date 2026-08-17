@@ -240,6 +240,11 @@ function hiddenLabelKeys(): Set<string> {
 
 // ---------- cache ----------
 
+// Increment when extraction or sentence-coordinate semantics change. Keeping
+// this separate from PROMPT_VERSION prevents a repaired reader from reusing
+// classifications generated from structurally corrupted page text.
+const EXTRACTION_VERSION = 2;
+
 async function cacheDir(): Promise<string> {
   const dir = PathUtils.join(Zotero.DataDirectory.dir, "skimread-cache");
   await IOUtils.makeDirectory(dir, { ignoreExisting: true });
@@ -265,7 +270,7 @@ async function cacheKey(attachment: Zotero.Item): Promise<string> {
   const labels = getConfiguredLabels();
   const labelSig =
     mode === "auto" ? "auto" : labels!.map((l) => l.key).join(",");
-  const raw = `${fileHash}|${providerLabel()}|${model}|${mode}|${labelSig}|v${PROMPT_VERSION}`;
+  const raw = `${fileHash}|${providerLabel()}|${model}|${mode}|${labelSig}|extract-v${EXTRACTION_VERSION}|prompt-v${PROMPT_VERSION}`;
   return sha256(new TextEncoder().encode(raw));
 }
 

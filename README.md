@@ -30,8 +30,8 @@ It is a triage aid, not a summary and not a substitute for reading. Please see
 - Runs privately with [Ollama](https://ollama.com) or a localhost-compatible
   server by default.
 - Supports local or cloud OpenAI-compatible servers, including API providers
-  that expose a compatible endpoint, plus ChatGPT/Codex or Claude subscription
-  logins. Anything remote requires explicit cloud consent.
+  that expose a compatible endpoint, plus ChatGPT/Codex, Claude, or Google
+  Antigravity CLI logins. Anything remote requires explicit cloud consent.
 - Keeps results in a local cache so a previously processed PDF can be reopened
   quickly.
 - Lets you switch between the core narrative and optional supporting context,
@@ -211,13 +211,32 @@ SkimRead runs the CLI headlessly for a single structured request with tools
 disabled, so Claude cannot read files, run commands, or touch Zotero. No API key
 is read or stored, and nothing is kept after the result is cached.
 
+### Antigravity CLI (Google login, experimental)
+
+Runs schema-constrained selection through an installed Google Antigravity CLI
+using its existing login — no API key is read by SkimRead.
+
+1. Install Antigravity CLI and sign in by running `agy` once.
+2. In Settings, choose **Antigravity CLI**, enable cloud consent, and use
+   **Refresh** to select a model reported by your installed `agy` CLI.
+3. Leave **Antigravity CLI path** blank to auto-detect `~/.local/bin/agy`, or
+   enter an absolute path for a non-standard installation.
+
+Antigravity is a coding-agent CLI, not a dedicated inference server. Its agent
+harness adds substantial input-token overhead, and it currently creates a local
+conversation and transcript for every request. SkimRead runs it in sandbox mode
+and instructs it not to use tools, but Antigravity does not yet expose a strict
+tool-free or ephemeral print mode. Use this provider only when those tradeoffs
+are acceptable.
+
 ## Privacy
 
 Local providers are the default and never send paper text off your machine.
 
-OpenAI, Anthropic, and Codex App Server are optional cloud modes. SkimRead
-will not use any of them until you explicitly enable the cloud-consent setting;
-there is no silent fallback from a local provider to a cloud provider. API keys,
+OpenAI, Anthropic, Codex App Server, Claude Code, and Antigravity CLI are
+optional cloud modes. SkimRead will not use any of them until you explicitly
+enable the cloud-consent setting; there is no silent fallback from a local
+provider to a cloud provider. API keys,
 prompts, and provider transcripts are not logged or cached by the plugin.
 
 ## Limitations and bias

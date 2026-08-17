@@ -4,7 +4,13 @@
  */
 import { config } from "../../package.json";
 import { getString } from "../utils/locale";
-import { checkStatus, missingModels, providerLabel } from "../llm/ollama";
+import {
+  checkStatus,
+  listAntigravityModels,
+  missingModels,
+  modelForProvider,
+  providerLabel,
+} from "../llm/ollama";
 import { getPref, setPref } from "../utils/prefs";
 import { parseCustomLabels } from "../prompts/skim";
 
@@ -27,24 +33,40 @@ export function onPrefsLoad(window: Window) {
   const out = $("test-result") as HTMLElement | null;
   if (btn && out) {
     btn.addEventListener("click", async () => {
-      out.textContent = getString("status-checking");
+      out.textContent = getString("status-checking", {
+        args: { provider: providerLabel() },
+      });
       const status = await checkStatus();
       if (!status.ok) {
         out.textContent = `${providerLabel()} not reachable (${status.error || ""})`;
         return;
       }
       const missing = missingModels(status);
+      const configuredModel = modelForProvider("");
+      const configuredMissing =
+        status.models.length > 0 &&
+        configuredModel.length > 0 &&
+        !status.models.includes(configuredModel);
       out.textContent =
-        getString("status-ok", { args: { version: status.version || "?" } }) +
+        getString("status-ok", {
+          args: {
+            provider: providerLabel(),
+            version: status.version || "?",
+          },
+        }) +
         (missing.length
           ? " — " +
             getString("status-missing-models", {
               args: { models: missing.join(", ") },
             }) +
             ` — ollama pull ${missing[0]}`
-          : status.models.length
-            ? ` — ${status.models.join(", ")}`
-            : "");
+          : configuredMissing
+            ? ` — selected model “${configuredModel}” is unavailable; refresh the model list`
+            : status.models.length
+              ? ` — ${status.models.length} models available${
+                  configuredModel ? `; selected: ${configuredModel}` : ""
+                }`
+              : "");
     });
   }
 
@@ -53,7 +75,9 @@ export function onPrefsLoad(window: Window) {
   if (sel) {
     const current = String(getPref("apiType") || "openai-compatible");
     sel.value =
-      current === "codex-app-server" || current === "claude-code"
+      current === "codex-app-server" ||
+      current === "claude-code" ||
+      current === "antigravity-cli"
         ? current
         : "openai-compatible";
 
@@ -66,6 +90,7 @@ export function onPrefsLoad(window: Window) {
       const http = sel.value === "openai-compatible";
       const codex = sel.value === "codex-app-server";
       const claude = sel.value === "claude-code";
+      const antigravity = sel.value === "antigravity-cli";
       set("url-row", http);
       set("compat-key-row", http);
       set("skim-model-row", http);
@@ -74,9 +99,10 @@ export function onPrefsLoad(window: Window) {
       // Consent covers the CLI logins and any remote OpenAI-compatible endpoint;
       // localhost never triggers the consent check at request time.
       set("consent-row", true);
-      set("cloud-settings", codex || claude);
+      set("cloud-settings", codex || claude || antigravity);
       set("codex-settings", codex);
       set("claude-settings", claude);
+      set("antigravity-settings", antigravity);
     };
 
     const save = () => {
@@ -96,6 +122,16 @@ export function onPrefsLoad(window: Window) {
   // left to it silently neither loads its stored value nor saves a change.
   /** Append a XUL menuitem to a menulist's popup. */
   const addMenuItem = (list: Element, value: string, label: string) => {
+    if (list.localName === "select") {
+      const option = doc.createElementNS(
+        "http://www.w3.org/1999/xhtml",
+        "option",
+      ) as HTMLOptionElement;
+      option.value = value;
+      option.textContent = label;
+      list.appendChild(option);
+      return option;
+    }
     const popup =
       list.querySelector("menupopup") ??
       list.appendChild(
@@ -117,6 +153,7 @@ export function onPrefsLoad(window: Window) {
     pref:
       | "claudeModel"
       | "codexModel"
+      | "antigravityModel"
       | "codexReasoning"
       | "annotationLabelDestination",
     fallback: string,
@@ -127,7 +164,7 @@ export function onPrefsLoad(window: Window) {
     // Keep a stored value that is not among the offered options (a full model
     // ID, or one from a newer CLI) selectable instead of silently rewriting it.
     const values = (
-      Array.from(el.querySelectorAll("menuitem")) as Element[]
+      Array.from(el.querySelectorAll("menuitem, option")) as Element[]
     ).map((m) => m.getAttribute("value"));
     if (!values.includes(stored)) addMenuItem(el, stored, stored);
     el.value = stored;
@@ -156,44 +193,78 @@ export function onPrefsLoad(window: Window) {
     commentPrefix.addEventListener("change", savePrefix);
   }
   const codexModelSel = bindSelect("codexModel", "codexModel", "gpt-5.6-luna");
+  const antigravityModelSel = bindSelect(
+    "antigravityModel",
+    "antigravityModel",
+    "gemini-3.7-flash-low",
+  );
 
-  // Codex exposes a model list over its app server, so offer the real thing
-  // rather than a hardcoded guess. Behind a button: listing starts the CLI.
-  const codexRefresh = $("codex-refresh-models") as HTMLButtonElement | null;
-  if (codexModelSel && codexRefresh) {
-    codexRefresh.addEventListener("click", async () => {
+  // Subscription CLIs expose their current model catalog, so use what the
+  // installed version actually reports instead of keeping a hardcoded list.
+  const wireCliModelRefresh = (
+    modelSelect: Element & { value: string },
+    button: HTMLButtonElement,
+    name: string,
+  ) => {
+    button.addEventListener("click", async () => {
       const out = $("test-result") as HTMLElement | null;
-      if (out) out.textContent = getString("status-checking");
-      const status = await checkStatus();
+      if (out) {
+        out.textContent = getString("status-checking", {
+          args: { provider: name },
+        });
+      }
+      const status =
+        name === "Antigravity"
+          ? await listAntigravityModels()
+          : await checkStatus();
       if (!status.ok || !status.models.length) {
         if (out) {
-          out.textContent = `Could not list Codex models${
+          out.textContent = `Could not list ${name} models${
             status.error ? ` (${status.error})` : ""
           }`;
         }
         return;
       }
-      const current = codexModelSel.value;
-      const popup = codexModelSel.querySelector("menupopup");
-      if (popup) popup.textContent = "";
+      const current = modelSelect.value;
+      const popup = modelSelect.querySelector("menupopup");
+      if (popup) {
+        while (popup.lastChild) popup.removeChild(popup.lastChild);
+      } else modelSelect.textContent = "";
       for (const model of status.models) {
-        addMenuItem(codexModelSel, model, model);
+        addMenuItem(modelSelect, model, model);
       }
       // Preserve the current choice when the server still offers it.
-      codexModelSel.value = status.models.includes(current)
+      const selected = status.models.includes(current)
         ? current
         : status.models[0];
-      setPref("codexModel", codexModelSel.value);
-      if (out) out.textContent = `${status.models.length} Codex models`;
+      modelSelect.value = selected;
+      modelSelect.setAttribute("value", selected);
+      setPref(name === "Codex" ? "codexModel" : "antigravityModel", selected);
+      if (out) out.textContent = `${status.models.length} ${name} models`;
     });
+  };
+  const codexRefresh = $("codex-refresh-models") as HTMLButtonElement | null;
+  if (codexModelSel && codexRefresh) {
+    wireCliModelRefresh(codexModelSel, codexRefresh, "Codex");
+  }
+  const antigravityRefresh = $(
+    "antigravity-refresh-models",
+  ) as HTMLButtonElement | null;
+  if (antigravityModelSel && antigravityRefresh) {
+    wireCliModelRefresh(antigravityModelSel, antigravityRefresh, "Antigravity");
   }
 
   // --- model picker: populate the datalist from the server's models ---
   const populateModels = async () => {
+    if (sel?.value !== "openai-compatible") return;
     const list = $("model-list") as HTMLElement | null;
     if (!list) return;
     const result = $("test-result") as HTMLElement | null;
-    if (result) result.textContent = getString("status-checking");
+    if (result) {
+      result.textContent = getString("status-checking", {
+        args: { provider: providerLabel() },
+      });
+    }
     const status = await checkStatus();
     list.textContent = "";
     for (const model of status.models) {

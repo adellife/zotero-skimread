@@ -15,6 +15,8 @@ declare namespace _ZoteroTypes {
       "codexReasoning": string;
       "claudeModel": string;
       "claudePath": string;
+      "antigravityModel": string;
+      "antigravityPath": string;
       "cloudConsent": boolean;
       "contextTokens": number;
       "ollamaNumCtx": number;

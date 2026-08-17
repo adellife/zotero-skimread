@@ -25,6 +25,10 @@
           label="Claude Code — Claude subscription login"
           value="claude-code"
         />
+        <menuitem
+          label="Antigravity CLI — Google login (experimental)"
+          value="antigravity-cli"
+        />
       </menupopup>
     </menulist>
   </hbox>
@@ -133,6 +137,51 @@
         Aliases always resolve to the current version of that model, so this
         does not need updating when new ones are released. Sonnet suits
         skimming; Haiku is quicker on long books.
+      </description>
+    </vbox>
+    <vbox
+      id="zotero-prefpane-__addonRef__-antigravity-settings"
+      style="gap: 8px"
+    >
+      <description style="max-width: 520px">
+        Uses your signed-in Google Antigravity CLI session. This is an
+        experimental cloud provider: every request sends extracted document text
+        to the selected model, and Antigravity currently creates a local
+        conversation and transcript for each request. Its coding-agent harness
+        also uses substantially more input tokens than a direct model API.
+      </description>
+      <hbox align="center">
+        <html:label for="zotero-prefpane-__addonRef__-antigravityModel"
+          >Antigravity model</html:label
+        >
+        <menulist
+          id="zotero-prefpane-__addonRef__-antigravityModel"
+          style="width: 260px"
+        >
+          <menupopup />
+        </menulist>
+        <button
+          id="zotero-prefpane-__addonRef__-antigravity-refresh-models"
+          label="Refresh"
+        />
+      </hbox>
+      <hbox align="center">
+        <html:label for="zotero-prefpane-__addonRef__-antigravityPath"
+          >Antigravity CLI path</html:label
+        >
+        <html:input
+          type="text"
+          id="zotero-prefpane-__addonRef__-antigravityPath"
+          preference="antigravityPath"
+          placeholder="Auto-detect (~/.local/bin/agy)"
+          style="width: 260px"
+        />
+      </hbox>
+      <description style="max-width: 520px; font-size: 12px; opacity: 0.8">
+        Leave the path blank to check the current user's standard install
+        locations. SkimRead requests schema-constrained JSON and asks the agent
+        not to use tools, but Antigravity CLI does not yet expose a dedicated
+        tool-free inference-server mode.
       </description>
     </vbox>
   </vbox>
